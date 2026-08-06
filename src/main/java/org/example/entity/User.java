@@ -14,7 +14,6 @@ import jakarta.persistence.Table;
  */
 @Entity
 @Table(name = "users")   // 关键: 表名是 users(复数), 必须显式指定, 否则 JPA 默认用类名 user, 会和 PG 保留字冲突
-
 public class User {
 
     @Id
