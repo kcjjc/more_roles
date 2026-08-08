@@ -7,7 +7,6 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
-import org.hibernate.annotations.Array;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -78,12 +77,11 @@ public class DocChunk {
 
     /**
      * 向量字段，使用 PGVector 的 vector 类型。
-     * Hibernate 6.4+ 原生支持 pgvector，通过 hibernate-vector 模块实现。
-     * @JdbcTypeCode(SqlTypes.VECTOR) 告诉 Hibernate 这是向量类型。
-     * @Array(length = 1024) 指定维度，对应 text-embedding-v3 的输出维度。
+     * Hibernate 6.4+ 通过 hibernate-vector 模块原生支持 pgvector：
+     * @JdbcTypeCode(SqlTypes.VECTOR) 告诉 Hibernate 这是向量类型，
+     * columnDefinition = "vector(1024)" 指定维度（对应 text-embedding-v3 的 1024 维）。
      */
     @JdbcTypeCode(SqlTypes.VECTOR)
-    @Array(length = 1024)
     @Column(name = "embedding", columnDefinition = "vector(1024)")
     private float[] embedding;
 

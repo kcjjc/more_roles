@@ -1,6 +1,8 @@
 package org.example.service.splitter;
 
+import lombok.extern.slf4j.Slf4j;
 import org.example.service.loader.ParseResult;
+import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -13,6 +15,8 @@ import java.util.List;
  * 2. 按 chunkSize 滑动，步长 = chunkSize - chunkOverlap
  * 3. 尽量在句子/段落边界处断开，避免在句子中间截断
  */
+@Component("slidingWindowChunkSplitter")
+@Slf4j
 public class SlidingWindowChunkSplitter implements ChunkSplitter{
     @Override
     public List<ChunkResult> split(ParseResult parseResult, ChunkConfig config) {
@@ -34,7 +38,7 @@ public class SlidingWindowChunkSplitter implements ChunkSplitter{
                         .build());
             }
         }
-        return null;
+        return chunks;
     }
 
     private int estimatedTokens(String chunkText) {

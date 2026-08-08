@@ -47,6 +47,10 @@ public class ChunkService {
                 : slidingWindowSplitter;
 
         List<ChunkResult> chunks = splitter.split(parseResult, config);
+        if (chunks.isEmpty()) {
+            log.warn("[分块] 未获取到分块内容：策略={}", splitter.getClass().getSimpleName());
+            return List.of();
+        }
 
         // 过滤掉太短的块（少于 20 字符的碎片没有检索价值）
         chunks = chunks.stream()

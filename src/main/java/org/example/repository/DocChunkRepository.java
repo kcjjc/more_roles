@@ -5,6 +5,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -28,11 +29,13 @@ public interface DocChunkRepository extends JpaRepository<DocChunk, Long> {
 
     /** 删除某文档【指定版本之外】的旧分块 —— 重建索引后清理旧版本用. */
     @Modifying
+    @Transactional
     @Query("DELETE FROM DocChunk c WHERE c.docId = :docId AND c.docVersion <> :version")
     int deleteByDocIdAndDocVersionNot(@Param("docId") Long docId, @Param("version") Integer version);
 
     /** 删除某文档的全部分块(删文档时连带清理). */
     @Modifying
+    @Transactional
     @Query("DELETE FROM DocChunk c WHERE c.docId = :docId")
     int deleteByDocId(@Param("docId") Long docId);
 }

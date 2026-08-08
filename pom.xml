@@ -56,6 +56,14 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-jpa</artifactId>
         </dependency>
+        <!-- hibernate-vector:让 Hibernate 认识 pgvector 的 vector 类型
+             (配合 DocChunk 上的 @JdbcTypeCode(SqlTypes.VECTOR));
+             没有它 Hibernate 会把 float[] 当 bytea,报 vector/bytea 类型不匹配 -->
+        <dependency>
+            <groupId>org.hibernate.orm</groupId>
+            <artifactId>hibernate-vector</artifactId>
+            <version>${hibernate.version}</version>
+        </dependency>
         <!-- PostgreSQL JDBC 驱动:Java 连 PG 的底层驱动,版本由 spring-boot-parent 管理 -->
         <dependency>
             <groupId>org.postgresql</groupId>
