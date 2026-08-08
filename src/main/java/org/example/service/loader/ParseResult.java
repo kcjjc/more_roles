@@ -53,4 +53,13 @@ public class ParseResult {
         private String sectionTitle;
     }
 
+
+    public static ParseResult failure(String errorMsg) {
+        return ParseResult.builder()
+                .success(false)
+                .errorMsg(errorMsg)
+                .pages(List.of())
+                .build();
+    }
+
 }

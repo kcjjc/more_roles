@@ -187,4 +187,8 @@ public class IndexTask {
                 ", maxRetry=" + maxRetry +
                 '}';
     }
+
+    public boolean canRetry() {
+        return retryCount < maxRetry && status == STATUS_FAILED;
+    }
 }

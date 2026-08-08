@@ -7,6 +7,9 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
+import org.hibernate.annotations.Array;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.LocalDateTime;
 
@@ -72,6 +75,17 @@ public class DocChunk {
     /** 创建时间 */
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
+
+    /**
+     * 向量字段，使用 PGVector 的 vector 类型。
+     * Hibernate 6.4+ 原生支持 pgvector，通过 hibernate-vector 模块实现。
+     * @JdbcTypeCode(SqlTypes.VECTOR) 告诉 Hibernate 这是向量类型。
+     * @Array(length = 1024) 指定维度，对应 text-embedding-v3 的输出维度。
+     */
+    @JdbcTypeCode(SqlTypes.VECTOR)
+    @Array(length = 1024)
+    @Column(name = "embedding", columnDefinition = "vector(1024)")
+    private float[] embedding;
 
     @PrePersist
     void prePersist() {
@@ -174,5 +188,12 @@ public class DocChunk {
                 ", pageNum=" + pageNum +
                 ", docVersion=" + docVersion +
                 '}';
+    }
+
+    public float[] getEmbedding() {
+        return embedding;
+    }
+    public void setEmbedding(float[] embedding) {
+        this.embedding = embedding;
     }
 }
