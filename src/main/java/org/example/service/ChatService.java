@@ -162,17 +162,30 @@ public class ChatService {
         return persona + "\n\n[历史对话摘要，供你保持连贯]\n" + summary;
     }
 
-    /** 调用大模型: MessageChatMemoryAdvisor 自动加载窗口历史注入, conversationId 绑本会话 */
+    /**
+     * 调用大模型: MessageChatMemoryAdvisor 自动加载窗口历史注入, conversationId 绑本会话.
+     * <p>
+     * ⚠️ 只能触发一次 {@code doGetObservableChatClientResponse}: advisor 链的 {@code callAdvisors}
+     * 是一次性 Deque, {@code nextCall} 一路 pop, 整条链走完就空了. 故绝不能对同一个 callSpec
+     * 同时调 {@code content()} 和 {@code chatResponse()} —— 它俩各自独立触发一次完整链执行,
+     * 第二次 {@code nextCall} 会在已空的链上抛 "No CallAdvisors available to execute".
+     * 这里取一次 {@code chatResponse()}, 再从同一响应里同时拿回复内容和 token.
+     */
     private ChatResult invokeModel(String system, String convKey, String userContent) {
         MessageChatMemoryAdvisor advisor = MessageChatMemoryAdvisor.builder(chatMemory)
                 .conversationId(convKey)
                 .build();
-        var callSpec = chatClient.prompt()
+        ChatResponse chatResponse = chatClient.prompt()
                 .system(system)
                 .advisors(advisor)
                 .user(userContent)
-                .call();
-        return new ChatResult(callSpec.content(), extractTokens(callSpec.chatResponse()));
+                .call()
+                .chatResponse();
+        String reply = null;
+        if (chatResponse != null) {
+            reply = chatResponse.getResult().getOutput().getText();
+        }
+        return new ChatResult(reply, extractTokens(chatResponse));
     }
 
     /**
