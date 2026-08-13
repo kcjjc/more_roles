@@ -99,6 +99,7 @@ http://localhost:8080
 | 3.5 | DELETE | `/api/chat/conversations/{id}` | 是 | 删除会话（连带消息） |
 | 4.1 | POST | `/api/rag/search` | 是 | 纯向量检索（验证召回质量） |
 | 4.2 | POST | `/api/rag/ask` | 是 | 检索增强问答（检索 + 调模型） |
+| 4.3 | GET | `/api/rag/list` | 是 | 列出当前用户的知识库（分页，可按 kbId 筛选） |
 | 5.1 | GET | `/test/hello` | 否 | 默认 ChatClient 联调 |
 | 5.2 | GET | `/test/mao` | 否 | 猫娘人格 ChatClient 联调 |
 | 5.3 | GET | `/test/teacher` | 否 | 读取 `role/teacher.st` 的人格联调 |
@@ -520,7 +521,7 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 
 模块：`RagController`，路径前缀 `/api/rag`，**均需登录**。
 
-> 说明：当前 RAG 侧**仅完成检索与问答**，且**未接入对话主路径**（`ChatService` 不查 `doc_chunk`）。知识库入库走启动时 `DataInitializer` 灌入 `classpath:docs/*.txt`，**暂无 REST 上传/管理接口**。问答按 `kbId` 隔离，**未做用户级权限**校验。
+> 说明：当前 RAG 侧完成检索、问答与知识库列表查询，且**未接入对话主路径**（`ChatService` 不查 `doc_chunk`）。知识库入库走启动时 `DataInitializer` 灌入 `classpath:docs/*.txt`，**暂无创建/上传知识库的 REST 接口**（仅支持 [4.3 列表查询](#43-列出当前用户的知识库)）。问答按 `kbId` 隔离。
 
 向量检索基于 pgvector 的 cosine 距离（`<=>`），对外分数换算为**相似度**（`1 - 距离`，越大越相关）。Embedding 模型为阿里云 DashScope `text-embedding-v3`（**1024 维**）。
 
@@ -615,6 +616,46 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 | --- | --- |
 | `"query 不能为空"` | `query` 为空或请求体为 `null` |
 | `"模型暂时无响应，请重试"` | 模型调用异常（`IllegalStateException` 兜底） |
+
+### 4.3 列出当前用户的知识库
+
+分页返回当前用户创建的、未删除的知识库概览。可选按 `kbId` 精确筛选单个知识库。
+
+- **请求**：`GET /api/rag/list`
+- **请求头**：`satoken: <tokenValue>`
+- **查询参数**：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `kbId` | long | 否 | 知识库 id；传了则只返回该 id 的知识库，不传则返回当前登录用户的全部知识库 |
+| `page` | int | 否 | 页码，从 0 开始，默认 `0` |
+| `size` | int | 否 | 每页条数，默认 `10` |
+
+```
+GET /api/rag/list?page=0&size=10
+GET /api/rag/list?kbId=1
+```
+
+- **成功响应**：`data` 为 Spring Data `Page`，结构见 [分页响应结构](#分页响应结构)。
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "content": [
+      { "id": 1, "name": "公司制度", "description": "员工手册与规章制度" },
+      { "id": 2, "name": "产品手册", "description": null }
+    ],
+    "totalElements": 2,
+    "totalPages": 1,
+    "size": 10,
+    "number": 0
+  }
+}
+```
+
+- **失败响应**：本接口无业务失败场景；未登录访问由全局拦截器返回 `"未登录或登录已过期"`（`userId` 从登录态取，不信任请求参数）。
 
 ---
 
@@ -715,6 +756,30 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 | `answer` | string | 模型基于参考资料的回答 |
 | `sources` | [ChunkHit](#chunkhit)[] | 命中的来源片段 |
 
+### KbOverviewResult
+
+知识库概览 DTO，`RagService.KbOverviewResult`（record）。出现在 [4.3 知识库列表](#43-列出当前用户的知识库) 的分页 `content` 中。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | long | 知识库 id |
+| `name` | string | 知识库名称 |
+| `description` | string? | 知识库描述（可为 `null`） |
+
+### 分页响应结构
+
+[4.3 知识库列表](#43-列出当前用户的知识库) 返回 Spring Data 的 `Page<KbOverviewResult>`，`data` 字段主要结构如下：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `content` | [KbOverviewResult](#kboverviewresult)[] | 当前页数据 |
+| `totalElements` | long | 符合条件的总条数 |
+| `totalPages` | int | 总页数 |
+| `size` | int | 每页条数 |
+| `number` | int | 当前页码（从 0 开始） |
+
+> `Page` 另含 `pageable`、`first`、`last`、`empty` 等辅助字段，按需使用。
+
 ---
 
 ## 错误码与异常说明
@@ -752,8 +817,9 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 
 ```text
 1. POST /api/auth/login             → 拿到 tokenValue（知识库已由启动时灌入）
-2. POST /api/rag/search             → 验证召回质量（可选）
-3. POST /api/rag/ask                → 拿到基于文档的 answer + sources
+2. GET  /api/rag/list               → 列出可用知识库，拿到 kbId（可选）
+3. POST /api/rag/search             → 验证召回质量（可选）
+4. POST /api/rag/ask                → 拿到基于文档的 answer + sources
 ```
 
-**请求头**：第 2、3 步需 `satoken: <tokenValue>`。
+**请求头**：第 2、3、4 步需 `satoken: <tokenValue>`。

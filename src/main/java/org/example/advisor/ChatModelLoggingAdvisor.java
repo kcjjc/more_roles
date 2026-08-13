@@ -1,5 +1,6 @@
 package org.example.advisor;
 
+import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClientRequest;
@@ -56,7 +57,7 @@ public class ChatModelLoggingAdvisor implements CallAdvisor {
     }
 
     @Override
-    public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain chain) {
+    public @NotNull ChatClientResponse adviseCall(@NotNull ChatClientRequest request, @NotNull CallAdvisorChain chain) {
         onRequest(request);
 
         ChatClientResponse response;
@@ -95,7 +96,7 @@ public class ChatModelLoggingAdvisor implements CallAdvisor {
         ChatOptions options = request.prompt().getOptions();
         if (options instanceof ToolCallingChatOptions tco) {
             List<ToolCallback> callbacks = tco.getToolCallbacks();
-            if (callbacks == null || callbacks.isEmpty()) {
+            if (callbacks.isEmpty()) {
                 return List.of();
             }
             return callbacks.stream()
@@ -116,10 +117,6 @@ public class ChatModelLoggingAdvisor implements CallAdvisor {
             return;
         }
         Generation result = chatResponse.getResult();
-        if (result == null || result.getOutput() == null) {
-            log.info("(无生成结果)");
-            return;
-        }
         AssistantMessage msg = result.getOutput();
         if (msg.getText() != null) {
             log.info("回答：{}", msg.getText());

@@ -1,8 +1,13 @@
 package org.example.service;
 
+import com.openhtmltopdf.render.displaylist.PagedBoxCollector;
 import lombok.extern.slf4j.Slf4j;
+import org.example.repository.KnowledgeBaseRepository;
 import org.example.service.RetrievalService.ChunkHit;
+import org.example.entity.KnowledgeBase;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -26,6 +31,7 @@ public class RagService {
     private final RetrievalService retrievalService;
     /** 中立 ChatClient: 不带 defaultSystem(不带人格), system 由本服务按 RAG 场景定制注入 */
     private final ChatClient chatClient;
+    private final KnowledgeBaseRepository knowledgeBaseRepository;
 
     /** 防幻觉约束: 必须! 否则模型会用资料外的知识"热心编造"看似合理的答案 */
     private static final String SYSTEM = """
@@ -36,9 +42,10 @@ public class RagService {
             3. 回答简洁、直接, 可适当引用资料原文。
             """;
 
-    public RagService(RetrievalService retrievalService, ChatClient.Builder chatClientBuilder) {
+    public RagService(RetrievalService retrievalService, ChatClient.Builder chatClientBuilder, KnowledgeBaseRepository knowledgeBaseRepository) {
         this.retrievalService = retrievalService;
         this.chatClient = chatClientBuilder.build();   // 构建一次复用, 和 ChatService 同款写法
+        this.knowledgeBaseRepository = knowledgeBaseRepository;
     }
 
     /**
@@ -92,7 +99,23 @@ public class RagService {
         return sb.toString();
     }
 
+    /**
+     * 列出某用户的知识库概览(分页).
+     * <p>
+     * kbId 非空时, 在该用户的知识库范围内按 id 精确筛选; 为 null 则返回该用户的全部知识库.
+     */
+    public Page<KbOverviewResult> listKbs(Long userId, Long kbId, Pageable pageable) {
+        Page<KnowledgeBase> kbs = (kbId == null)
+                ? knowledgeBaseRepository.findByCreatedByAndDeletedFalse(userId, pageable)
+                : knowledgeBaseRepository.findByCreatedByAndIdAndDeletedFalse(userId, kbId, pageable);
+        return kbs.map(kb -> new KbOverviewResult(kb.getId(), kb.getName(), kb.getDescription()));
+    }
+
+
     /** 问答结果: 模型回答 + 命中来源(让前端/调用方能核验依据) */
     public record AskResult(String answer, List<ChunkHit> sources) {
+    }
+
+    public record KbOverviewResult(Long id,String name,String description) {
     }
 }
