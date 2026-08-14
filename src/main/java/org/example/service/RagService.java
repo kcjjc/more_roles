@@ -112,6 +112,25 @@ public class RagService {
     }
 
 
+    /**
+     * 新建知识库.
+     * <p>同一用户下【未删除】的知识库不允许重名(软删除的名字可重新使用);
+     * 名称列宽 100, 超长由调用方(Controller)先校验.
+     */
+    public KbOverviewResult createKb(Long userId, String name, String description) {
+        if (!knowledgeBaseRepository.findByCreatedByAndNameAndDeletedFalse(userId, name).isEmpty()) {
+            throw new IllegalArgumentException("知识库名称已存在: " + name);
+        }
+        KnowledgeBase kb = new KnowledgeBase();
+        kb.setName(name);
+        kb.setDescription(description);
+        kb.setCreatedBy(userId);
+        KnowledgeBase saved = knowledgeBaseRepository.save(kb);
+        log.info("[RAG] 新建知识库: kbId={}, name={}, userId={}", saved.getId(), name, userId);
+        return new KbOverviewResult(saved.getId(), saved.getName(), saved.getDescription());
+    }
+
+
     /** 问答结果: 模型回答 + 命中来源(让前端/调用方能核验依据) */
     public record AskResult(String answer, List<ChunkHit> sources) {
     }

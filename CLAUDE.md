@@ -37,7 +37,7 @@ mvn test -Dtest=类名#方法名    # 跑单个测试
 人格（systemPrompt）可能很长，按 **4000 字/片**切分入库（`persona_fragment` 表），多片共享一个 `persona_id`，读时按 `seq` 升序拼接，对上层屏蔽长度细节。软删除靠 `status`（1 有效 / 0 删除）。
 
 ### 3. RAG 入库管线（异步 ETL）
-入口 `IndexService.submitTask` → `IndexTaskLauncher.@Async("indexTaskExecutor")` → `LoadService.doIndex`：
+入口两个：`IndexService.submitTask`（直接给文本，跳过解析器，`DataInitializer` 用）和 `submitTaskFromMinio`（REST 上传的文件，从 MinIO 下载后走解析器）→ `IndexTaskLauncher.@Async("indexTaskExecutor")` → `LoadService.doIndex`：
 - **解析**（`DocumentLoaderService`）：按文件扩展名选 `DocumentParser`（支持 PDF / DOCX / MD / TXT），产出 `ParseResult`（含页码 / 章节）。
 - **分块**（`ChunkService`）：有章节结构走 `StructureAwareChunkSplitter`，否则走 `SlidingWindowChunkSplitter`；默认 512 字 / 64 重叠，过滤掉 <20 字的碎片。
 - **向量化**（`EmbeddingService`）：先查 Redis 缓存（key = 文本 MD5，前缀 `emb:v1:`，TTL 默认 7d），未命中批量调 API（20 条/批，`@Retryable` 3 次指数退避）。向量按逗号分隔字符串存 Redis（**不用** JSON 序列化器，避免浮点被当类名解析）。
@@ -57,7 +57,7 @@ mvn test -Dtest=类名#方法名    # 跑单个测试
 - **多个 ChatClient Bean 共存**：`number1ChatClient`（猫娘内置 prompt）/ `catGirlChatClient`（读 `classpath:role/cat_girl.st`）/ `toolChatClient`（装配 `WeatherTools` + `UserTools`）。生产对话用的是 `ChatService` 内部构建的匿名 client。`TestController`（`/test/**`，无需登录）是各 client + JPA 连通性的联调入口。
 - **工具是静态装配**：`@Tool` 声明在 `WeatherTools` / `UserTools` 上，由 `ToolChatClientConfig` 固定挂到 `toolChatClient`，不是按对话动态过滤。
 - **`@Async` 跨 Bean**：新增异步副作用务必放独立 Bean，否则代理不生效。
-- **MinIO 是半成品**：`MinioStorageService.download/delete` 当前直接 `throw UnsupportedOperationException`，`MinioConfig` 已存在但未接通；目前入库走的是 `DataInitializer` 的 classpath 文本，**没有 REST 上传 / 检索接口**。
+- **MinIO**：`MinioStorageService.upload`（>5MB 自动 multipart 分块，bucket 不存在自动建）与 `download` 已实现；REST 上传入库走 `POST /api/rag/kb/{kbId}/document`（`DocumentService` → MinIO → 建档 → 异步索引）。`delete` 仍是占位，删除文档功能待做。遗留：`DataInitializer` 灌的存量文档 minioPath 是假的（文件不在 MinIO），其重试路径（`executeFromMinio`）会下载失败。
 - **RAG 检索尚未接入对话**：`ChatService` 里没有 RAG advisor，对话目前不查 `doc_chunk`；RAG 侧只有入库（ETL）部分完成。
 - **密钥明文写在 `application.yaml`**：DB / Redis / MinIO / LLM 的密码与 api-key 都是明文，且该文件尚未加入 git。
 

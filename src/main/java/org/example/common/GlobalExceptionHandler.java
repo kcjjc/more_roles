@@ -30,4 +30,10 @@ public class GlobalExceptionHandler {
     public Result<?> handleIllegalState(IllegalStateException e) {
         return Result.fail("模型暂时无响应，请重试");
     }
+
+    /** 参数/业务校验不通过(如知识库重名、不支持的文件类型), message 即业务提示 */
+    @ExceptionHandler(IllegalArgumentException.class)
+    public Result<?> handleIllegalArgument(IllegalArgumentException e) {
+        return Result.fail(e.getMessage());
+    }
 }

@@ -100,6 +100,8 @@ http://localhost:8080
 | 4.1 | POST | `/api/rag/search` | 是 | 纯向量检索（验证召回质量） |
 | 4.2 | POST | `/api/rag/ask` | 是 | 检索增强问答（检索 + 调模型） |
 | 4.3 | GET | `/api/rag/list` | 是 | 列出当前用户的知识库（分页，可按 kbId 筛选） |
+| 4.4 | POST | `/api/rag/kb` | 是 | 新建知识库（同用户下不允许重名） |
+| 4.5 | POST | `/api/rag/kb/{kbId}/document` | 是 | 往知识库上传文档（MinIO + 异步索引） |
 | 5.1 | GET | `/test/hello` | 否 | 默认 ChatClient 联调 |
 | 5.2 | GET | `/test/mao` | 否 | 猫娘人格 ChatClient 联调 |
 | 5.3 | GET | `/test/teacher` | 否 | 读取 `role/teacher.st` 的人格联调 |
@@ -521,7 +523,7 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 
 模块：`RagController`，路径前缀 `/api/rag`，**均需登录**。
 
-> 说明：当前 RAG 侧完成检索、问答与知识库列表查询，且**未接入对话主路径**（`ChatService` 不查 `doc_chunk`）。知识库入库走启动时 `DataInitializer` 灌入 `classpath:docs/*.txt`，**暂无创建/上传知识库的 REST 接口**（仅支持 [4.3 列表查询](#43-列出当前用户的知识库)）。问答按 `kbId` 隔离。
+> 说明：当前 RAG 侧完成检索、问答、知识库管理（新建/列表）与文档上传，且**未接入对话主路径**（`ChatService` 不查 `doc_chunk`）。文档入库有两条路：启动时 `DataInitializer` 灌入 `classpath:docs/*.txt`（存量），或通过 [4.5 上传接口](#45-往知识库添加文件上传文档) 上传到 MinIO（>5MB 自动分块）。问答按 `kbId` 隔离。
 
 向量检索基于 pgvector 的 cosine 距离（`<=>`），对外分数换算为**相似度**（`1 - 距离`，越大越相关）。Embedding 模型为阿里云 DashScope `text-embedding-v3`（**1024 维**）。
 
@@ -657,6 +659,82 @@ GET /api/rag/list?kbId=1
 
 - **失败响应**：本接口无业务失败场景；未登录访问由全局拦截器返回 `"未登录或登录已过期"`（`userId` 从登录态取，不信任请求参数）。
 
+### 4.4 新建知识库
+
+为当前登录用户创建一个知识库。同一用户下未删除的知识库**不允许重名**（软删除的名字可重新使用）。
+
+- **请求**：`POST /api/rag/kb`
+- **请求头**：`satoken: <tokenValue>`
+- **Content-Type**：`application/json`
+- **请求体**：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string | 是 | 知识库名称，≤100 字，同用户下唯一 |
+| `description` | string | 否 | 描述/说明 |
+
+```json
+{ "name": "公司制度库", "description": "员工手册与规章制度" }
+```
+
+- **成功响应**：`data` 为 [`KbOverviewResult`](#kboverviewresult)。
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": { "id": 3, "name": "公司制度库", "description": "员工手册与规章制度" }
+}
+```
+
+- **失败响应**：
+
+| `message` | 触发条件 |
+| --- | --- |
+| `"name 不能为空"` | `name` 为空或请求体为 `null` |
+| `"name 长度不能超过 100"` | 名称超过列宽 100 字 |
+| `"知识库名称已存在: xxx"` | 同用户下已有同名未删除的知识库 |
+
+### 4.5 往知识库添加文件（上传文档）
+
+上传一个文档到指定知识库：文件分块存入 MinIO（≤5MB 单次 PUT，>5MB 自动 multipart 分块；bucket 不存在自动创建）→ 建 `document` 记录（`PENDING`）→ **异步**解析/分块/向量化（`indexTaskExecutor` 线程池，失败自动重试最多 3 次）。接口立即返回，索引状态后续体现在 `document.status`（暂无状态查询接口，可先查库观察）。
+
+- **请求**：`POST /api/rag/kb/{kbId}/document`
+- **请求头**：`satoken: <tokenValue>`
+- **Content-Type**：`multipart/form-data`
+- **路径参数**：`kbId` — 目标知识库 id（必须属于当前用户且未删除）
+- **表单字段**：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `file` | file | 是 | 文档文件；支持 PDF / DOCX / MD / TXT，单文件 ≤ 50MB |
+
+```bash
+curl -X POST http://localhost:8080/api/rag/kb/3/document \
+  -H "satoken: <tokenValue>" \
+  -F "file=@员工手册.pdf"
+```
+
+- **成功响应**：`data` 为 [`UploadResult`](#uploadresult)，`status` 初始为 `"PENDING"`，异步索引完成后变为 `"DONE"`（失败为 `"FAILED"`，原因记在 `document.error_msg`）。
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": { "docId": 7, "fileName": "员工手册.pdf", "fileType": "PDF", "status": "PENDING" }
+}
+```
+
+- **失败响应**：
+
+| `message` | 触发条件 |
+| --- | --- |
+| `"file 不能为空"` | 未选择文件或文件为空 |
+| `"知识库不存在: kbId=x"` | kbId 不存在 / 已软删除 / 不属于当前用户 |
+| `"不支持的文件类型: XXX, 目前支持 PDF / DOCX / MD / TXT"` | 扩展名不在白名单 |
+| `"文件超过大小上限 50MB: xxx"` | 超过单文件上限（与 `spring.servlet.multipart.max-file-size` 一致） |
+| `"MinIO 上传文件失败, ..."` | 对象存储写入异常（不会建档，无脏数据） |
+
 ---
 
 ## 5. 联调测试接口（公开）
@@ -758,13 +836,24 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 
 ### KbOverviewResult
 
-知识库概览 DTO，`RagService.KbOverviewResult`（record）。出现在 [4.3 知识库列表](#43-列出当前用户的知识库) 的分页 `content` 中。
+知识库概览 DTO，`RagService.KbOverviewResult`（record）。出现在 [4.3 知识库列表](#43-列出当前用户的知识库) 的分页 `content` 与 [4.4 新建知识库](#44-新建知识库) 的返回中。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | long | 知识库 id |
 | `name` | string | 知识库名称 |
 | `description` | string? | 知识库描述（可为 `null`） |
+
+### UploadResult
+
+文档上传结果 DTO，`DocumentService.UploadResult`（record）。出现在 [4.5 上传文档](#45-往知识库添加文件上传文档)。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `docId` | long | 文档 id（`document.id`） |
+| `fileName` | string | 原始文件名 |
+| `fileType` | string | 规范化类型：`PDF` / `DOCX` / `MD` / `TXT` |
+| `status` | string | 上传时固定为 `"PENDING"`；异步索引完成后变 `"DONE"`，失败为 `"FAILED"` |
 
 ### 分页响应结构
 
@@ -794,7 +883,7 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 | `"用户名或密码错误"` / `"用户名已存在"` 等 | `IllegalArgumentException` | 业务校验失败，`message` 为具体提示 |
 | `"会话不存在"` / `"无权访问该会话"` / `"人格不存在或已删除"` | `IllegalArgumentException` | 资源归属/存在性校验失败 |
 
-> 注：业务校验类 `IllegalArgumentException` 在 controller 内被 `try/catch` 直接转 `Result.fail`；系统级异常（`NotLoginException`、`OptimisticLockingFailureException`、`IllegalStateException`）由全局处理器兜底。
+> 注：业务校验类 `IllegalArgumentException` 由 `GlobalExceptionHandler` 统一转 `Result.fail(message)`；系统级异常（`NotLoginException`、`OptimisticLockingFailureException`、`IllegalStateException`）同样由全局处理器兜底。
 
 ---
 
@@ -816,10 +905,11 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 ### B. 知识库问答流程
 
 ```text
-1. POST /api/auth/login             → 拿到 tokenValue（知识库已由启动时灌入）
-2. GET  /api/rag/list               → 列出可用知识库，拿到 kbId（可选）
-3. POST /api/rag/search             → 验证召回质量（可选）
-4. POST /api/rag/ask                → 拿到基于文档的 answer + sources
+1. POST /api/auth/login             → 拿到 tokenValue
+2. POST /api/rag/kb                 → 新建知识库, 拿到 kbId(已有库可跳过, 用 /api/rag/list 查)
+3. POST /api/rag/kb/{kbId}/document → 上传文档, 返回 PENDING, 索引异步进行
+4. POST /api/rag/search             → 索引完成后验证召回质量(可选)
+5. POST /api/rag/ask                → 拿到基于文档的 answer + sources
 ```
 
-**请求头**：第 2、3、4 步需 `satoken: <tokenValue>`。
+**请求头**：第 2~5 步均需 `satoken: <tokenValue>`。启动时 `DataInitializer` 灌入的存量文档（`kbId=1`）无需第 2、3 步即可直接检索/问答。

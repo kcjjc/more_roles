@@ -19,5 +19,11 @@ public class IndexTaskLauncher {
         loadService.executeWithText(taskId,docId,textContent);
     }
 
+    /** 文件已存 MinIO 的文档: 异步从 MinIO 下载 → 解析 → 索引(REST 上传入口走这条) */
+    @Async("indexTaskExecutor")
+    public void launchFromMinio(Long taskId, Long docId) {
+        loadService.executeFromMinio(taskId, docId);
+    }
+
 
 }

@@ -1,0 +1,96 @@
+package org.example.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.example.entity.Document;
+import org.example.entity.KnowledgeBase;
+import org.example.repository.DocumentRepository;
+import org.example.repository.KnowledgeBaseRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Set;
+import java.util.UUID;
+
+/**
+ * 知识库文档上传服务: 校验 → MinIO 分块上传 → 建 Document 记录 → 提交异步索引.
+ * <p>
+ * 上传请求只负责"文件落 MinIO + 建档 + 投递任务", 解析/分块/向量化在
+ * indexTaskExecutor 线程池异步进行(见 LoadService), 接口立即返回.
+ *
+ * @author ckj
+ */
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class DocumentService {
+
+    /** 上传的文件类型白名单(与 DocumentLoaderService 已装配的解析器一致) */
+    private static final Set<String> SUPPORTED_TYPES = Set.of(
+            Document.FILE_TYPE_PDF, Document.FILE_TYPE_DOCX,
+            Document.FILE_TYPE_MD, Document.FILE_TYPE_TXT);
+
+    /** 单文件大小上限; 与 application.yaml 的 spring.servlet.multipart.max-file-size 保持一致 */
+    private static final long MAX_FILE_SIZE = 50 * 1024 * 1024;
+
+    private final KnowledgeBaseRepository knowledgeBaseRepository;
+    private final DocumentRepository documentRepository;
+    private final DocumentLoaderService documentLoaderService;
+    private final MinioStorageService minioStorageService;
+    private final IndexService indexService;
+
+    /**
+     * 往知识库添加一个文件: 校验归属与文件 → 上传 MinIO → 建档(PENDING) → 提交异步索引.
+     * <p>立即返回, 索引进度看 document.status / index_task.
+     */
+    public UploadResult addFile(Long kbId, Long userId, MultipartFile file) {
+        // 1. 知识库必须存在、未删除、且属于当前用户
+        knowledgeBaseRepository.findByIdAndCreatedByAndDeletedFalse(kbId, userId)
+                .orElseThrow(() -> new IllegalArgumentException("知识库不存在: kbId=" + kbId));
+
+        // 2. 文件校验: 非空 / 类型在白名单 / 不超大小上限
+        String fileName = file.getOriginalFilename();
+        if (fileName == null || fileName.isBlank()) {
+            throw new IllegalArgumentException("文件名不能为空");
+        }
+        String fileType = documentLoaderService.detectFileType(fileName);
+        if (!SUPPORTED_TYPES.contains(fileType)) {
+            throw new IllegalArgumentException("不支持的文件类型: " + fileType + ", 目前支持 PDF / DOCX / MD / TXT");
+        }
+        if (file.getSize() > MAX_FILE_SIZE) {
+            throw new IllegalArgumentException("文件超过大小上限 50MB: " + fileName);
+        }
+
+        // 3. MinIO 对象路径: {kbId}/{uuid}.{ext} —— 防重名防乱码, 原始文件名存 document 表
+        String objectPath = kbId + "/" + UUID.randomUUID()
+                + fileName.substring(fileName.lastIndexOf('.'));
+
+        // 4. 分块上传(超 5MB 自动 multipart; bucket 不存在自动建)
+        try (InputStream in = file.getInputStream()) {
+            minioStorageService.upload(objectPath, in, file.getSize(), file.getContentType());
+        } catch (IOException e) {
+            throw new RuntimeException("读取上传文件失败: " + fileName, e);
+        }
+
+        // 5. 建档(PENDING)后提交异步索引
+        Document document = new Document();
+        document.setKbId(kbId);
+        document.setFileName(fileName);
+        document.setFileType(fileType);
+        document.setFileSize(file.getSize());
+        document.setMinioPath(objectPath);
+        document.setUploadedBy(userId);
+        Document saved = documentRepository.save(document);
+        indexService.submitTaskFromMinio(saved.getId());
+
+        log.info("[文档上传] kbId={}, docId={}, fileName={}, {}字节, 已提交异步索引",
+                kbId, saved.getId(), fileName, file.getSize());
+        return new UploadResult(saved.getId(), fileName, fileType, saved.getStatus());
+    }
+
+    /** 上传结果: 文档 id + 初始状态(索引异步进行, 完成后变为 DONE) */
+    public record UploadResult(Long docId, String fileName, String fileType, String status) {
+    }
+}

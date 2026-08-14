@@ -10,6 +10,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 
@@ -28,10 +29,13 @@ public class RagController {
 
     private final org.example.service.RetrievalService retrievalService;
     private final RagService ragService;
+    private final org.example.service.DocumentService documentService;
 
-    public RagController(org.example.service.RetrievalService retrievalService, RagService ragService) {
+    public RagController(org.example.service.RetrievalService retrievalService, RagService ragService,
+                         org.example.service.DocumentService documentService) {
         this.retrievalService = retrievalService;
         this.ragService = ragService;
+        this.documentService = documentService;
     }
 
     /** 检索请求体: query 必填, kbId / topK 可选 */
@@ -44,6 +48,10 @@ public class RagController {
 
     /** 知识库列表查询参数: kbId 可选, 传了则只返回该 id 的知识库 */
     public record KbOverviewRequest(Long kbId) {
+    }
+
+    /** 新建知识库请求体: name 必填(≤100字), description 可选 */
+    public record CreateKbRequest(String name, String description) {
     }
 
     /**
@@ -83,5 +91,35 @@ public class RagController {
         Long userId = StpUtil.getLoginIdAsLong();
         Pageable pageable = PageRequest.of(page, size);
         return Result.ok(ragService.listKbs(userId, req.kbId(), pageable));
+    }
+
+    /**
+     * 新建知识库: POST /api/rag/kb
+     * <p>body: {"name":"公司制度库","description":"可选"} → 返回新建的知识库概览.
+     * 同一用户下未删除的知识库不允许重名.
+     */
+    @PostMapping("/kb")
+    public Result<KbOverviewResult> createKb(@RequestBody CreateKbRequest req) {
+        if (req == null || req.name() == null || req.name().isBlank()) {
+            return Result.fail("name 不能为空");
+        }
+        if (req.name().length() > 100) {
+            return Result.fail("name 长度不能超过 100");
+        }
+        return Result.ok(ragService.createKb(StpUtil.getLoginIdAsLong(), req.name().trim(), req.description()));
+    }
+
+    /**
+     * 往知识库添加文件: POST /api/rag/kb/{kbId}/document
+     * <p>multipart/form-data, 字段名 file; 支持 PDF / DOCX / MD / TXT, 单文件 ≤ 50MB.
+     * 上传成功立即返回(PENDING), 解析/分块/向量化异步进行.
+     */
+    @PostMapping("/kb/{kbId}/document")
+    public Result<org.example.service.DocumentService.UploadResult> uploadDocument(
+            @PathVariable Long kbId, @RequestParam("file") MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            return Result.fail("file 不能为空");
+        }
+        return Result.ok(documentService.addFile(kbId, StpUtil.getLoginIdAsLong(), file));
     }
 }

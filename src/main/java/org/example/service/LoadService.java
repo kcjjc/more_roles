@@ -149,7 +149,8 @@ public class LoadService {
         }
     }
 
-    private void executeFromMinio(Long taskId, Long docId) {
+    /** 从 MinIO 下载文件并走解析器索引(REST 上传的文档走这条; 也供失败重试复用). */
+    public void executeFromMinio(Long taskId, Long docId) {
         Document doc = documentRepository.findById(docId).orElseThrow();
         try {
             byte[] fileBytes = minioStorageService.download(doc.getMinioPath());

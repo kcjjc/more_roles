@@ -63,7 +63,9 @@ public class DocumentLoaderService {
         return result;
     }
 
-    private String detectFileType(String fileName) {
+    /** 按文件名识别类型: 返回规范化的类型串(PDF/DOCX/MD/TXT), 无扩展名返回 UNKNOWN.
+     *  上传前的类型白名单校验也要用它, 因此放开为 public. */
+    public String detectFileType(String fileName) {
         if (fileName == null) return "UNKNOWN";
         int dotIndex = fileName.lastIndexOf('.');
         if (dotIndex < 0) return "UNKNOWN";
