@@ -10,7 +10,8 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 /**
  * Sa-Token 路由拦截配置.
  * <p>
- * 规则: /api/** 下除 /api/auth/**(注册/登录/注销)外, 其余接口都必须登录.
+ * 规则: /api/** 与 /test/**(联调入口, 会触发工具调用查用户) 都必须登录,
+ * 仅放行 /api/auth/**(注册/登录/注销).
  * 未登录时由拦截器抛出 {@link cn.dev33.satoken.exception.NotLoginException},
  * 再由 GlobalExceptionHandler 统一转成 Result.
  *
@@ -22,8 +23,8 @@ public class SaTokenConfigure implements WebMvcConfigurer {
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(new SaInterceptor(handler ->
-                // 所有 /api/** 接口默认都要登录, 仅放行认证接口
-                SaRouter.match("/api/**")
+                // /api/** 与 /test/** 默认都要登录, 仅放行认证接口
+                SaRouter.match("/api/**", "/test/**")
                         .notMatch("/api/auth/**")
                         .check(r -> StpUtil.checkLogin())
         )).addPathPatterns("/**");

@@ -40,7 +40,7 @@ mvn test -Dtest=类名#方法名    # 跑单个测试
 入口两个：`IndexService.submitTask`（直接给文本，跳过解析器，`DataInitializer` 用）和 `submitTaskFromMinio`（REST 上传的文件，从 MinIO 下载后走解析器）→ `IndexTaskLauncher.@Async("indexTaskExecutor")` → `LoadService.doIndex`：
 - **解析**（`DocumentLoaderService`）：按文件扩展名选 `DocumentParser`（支持 PDF / DOCX / MD / TXT），产出 `ParseResult`（含页码 / 章节）。
 - **分块**（`ChunkService`）：有章节结构走 `StructureAwareChunkSplitter`，否则走 `SlidingWindowChunkSplitter`；默认 512 字 / 64 重叠，过滤掉 <20 字的碎片。
-- **向量化**（`EmbeddingService`）：先查 Redis 缓存（key = 文本 MD5，前缀 `emb:v1:`，TTL 默认 7d），未命中批量调 API（20 条/批，`@Retryable` 3 次指数退避）。向量按逗号分隔字符串存 Redis（**不用** JSON 序列化器，避免浮点被当类名解析）。
+- **向量化**（`EmbeddingService`）：先查 Redis 缓存（key = 文本 MD5，前缀 `emb:v1:`，TTL 默认 7d），未命中批量调 API（20 条/批，`RetryTemplate` 3 次指数退避——编程式重试，勿改回 `@Retryable`：`embedBatch` 自调用会绕过 AOP 代理使注解失效）。向量按逗号分隔字符串存 Redis（**不用** JSON 序列化器，避免浮点被当类名解析）。
 - **落库**：删旧版本分块（按 `doc_version`）→ `saveAll` 写 `DocChunk`（embedding 已 set）→ 更新 `document` / `index_task` 状态。失败走指数退避重试（`LoadService.retryIfPossible`）。
 - 启动时 `DataInitializer` 会把 `classpath:docs/*.txt` 灌进去（`document` 表为空时）。
 
@@ -54,7 +54,7 @@ mvn test -Dtest=类名#方法名    # 跑单个测试
 
 - **向量维度硬约束 1024**：`DocChunk.embedding` 是 `vector(1024)`、`schema.sql` 也是 1024、对应 `text-embedding-v3`。换 embedding 模型需同步改实体 `columnDefinition` + schema + 重建索引。
 - **`DocChunk.embedding` 是 NOT NULL**：分块入库必须带 embedding（`LoadService` 里 set 了）。但向量**相似度检索（`<=>`）和全文检索（`content_tsv`）JPQL 写不了**，检索要走原生 SQL / JdbcTemplate —— `DocChunkRepository` 只管元数据读取与清理，不承担检索。
-- **多个 ChatClient Bean 共存**：`number1ChatClient`（猫娘内置 prompt）/ `catGirlChatClient`（读 `classpath:role/cat_girl.st`）/ `toolChatClient`（装配 `WeatherTools` + `UserTools`）。生产对话用的是 `ChatService` 内部构建的匿名 client。`TestController`（`/test/**`，无需登录）是各 client + JPA 连通性的联调入口。
+- **多个 ChatClient Bean 共存**：`number1ChatClient`（猫娘内置 prompt）/ `catGirlChatClient`（读 `classpath:role/cat_girl.st`）/ `toolChatClient`（装配 `WeatherTools` + `UserTools`）。生产对话用的是 `ChatService` 内部构建的匿名 client。`TestController`（`/test/**`，**需登录**——因 `/test/getUser` 会触发 `UserTools` 查用户，2026-08 起与 `/api/**` 一并纳入 Sa-Token 拦截）是各 client + JPA 连通性的联调入口。
 - **工具是静态装配**：`@Tool` 声明在 `WeatherTools` / `UserTools` 上，由 `ToolChatClientConfig` 固定挂到 `toolChatClient`，不是按对话动态过滤。
 - **`@Async` 跨 Bean**：新增异步副作用务必放独立 Bean，否则代理不生效。
 - **MinIO**：`MinioStorageService.upload`（>5MB 自动 multipart 分块，bucket 不存在自动建）与 `download` 已实现；REST 上传入库走 `POST /api/rag/kb/{kbId}/document`（`DocumentService` → MinIO → 建档 → 异步索引）。`delete` 仍是占位，删除文档功能待做。遗留：`DataInitializer` 灌的存量文档 minioPath 是假的（文件不在 MinIO），其重试路径（`executeFromMinio`）会下载失败。

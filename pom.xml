@@ -99,6 +99,12 @@
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-pool2</artifactId>
         </dependency>
+        <!-- Embedding API 调用重试(RetryTemplate); 此前只是 spring-ai 的传递依赖,
+             主代码直接使用其类, 改为显式声明; 版本由 spring-boot-parent 管理 -->
+        <dependency>
+            <groupId>org.springframework.retry</groupId>
+            <artifactId>spring-retry</artifactId>
+        </dependency>
         <!-- ========== MinIO（文件存储） ========== -->
         <dependency>
             <groupId>io.minio</groupId>

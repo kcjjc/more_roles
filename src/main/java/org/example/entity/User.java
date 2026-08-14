@@ -52,10 +52,10 @@ public class User {
 
     @Override
     public String toString() {
+        // 不含 password: 实体可能被拼进日志 / LLM 工具返回(见 UserTools), 密码不能随之外泄
         return "User{" +
                 "id=" + id +
                 ", username='" + username + '\'' +
-                ", password='" + password + '\'' +
                 '}';
     }
 }

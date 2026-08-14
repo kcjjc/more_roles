@@ -8,9 +8,7 @@ import org.springframework.ai.embedding.EmbeddingRequest;
 import org.springframework.ai.embedding.EmbeddingResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.retry.annotation.Backoff;
-import org.springframework.retry.annotation.Recover;
-import org.springframework.retry.annotation.Retryable;
+import org.springframework.retry.support.RetryTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -34,6 +32,17 @@ public class EmbeddingService {
     private Duration embeddingTtl;
 
     private static final int BATCH_SIZE = 20;
+
+    /**
+     * embedding API 调用的重试模板: 3 次尝试, 指数退避 1s / 2s。
+     * 用编程式 RetryTemplate 而不是 @Retryable —— embedBatch 里调 embedFromApi 属于同类自调用,
+     * 注解式必须经 AOP 代理才生效, 自调用会静默绕过(且工程从未开启 @EnableRetry), 重试从未生效过。
+     */
+    private final RetryTemplate retryTemplate = RetryTemplate.builder()
+            .maxAttempts(3)
+            .exponentialBackoff(1000, 2, 10_000)
+            .retryOn(Exception.class)
+            .build();
 
     /**
      * 批量向量化，带 Redis 缓存。
@@ -83,15 +92,21 @@ public class EmbeddingService {
 
     /**
      * 调 Embedding API，按批次处理，避免单次请求过大。
-     * 带重试：网络抖动时自动重试 3 次，指数退避。
+     * 带重试：网络抖动时自动重试 3 次（RetryTemplate，指数退避）。
      * texts是一个文档的所有分块
      */
-    @Retryable(
-            retryFor = Exception.class,
-            maxAttempts = 3,
-            backoff = @Backoff(delay = 1000, multiplier = 2)
-    )
-    public List<float[]> embedFromApi(List<String> texts) {
+    private List<float[]> embedFromApi(List<String> texts) {
+        try {
+            return retryTemplate.execute(ctx -> doEmbedFromApi(texts));
+        } catch (Exception e) {
+            log.error("[Embedding] 重试3次后仍失败，texts.size={}，error={}",
+                    texts.size(), e.getMessage());
+            throw new RuntimeException("Embedding API 调用失败，已重试3次：" + e.getMessage(), e);
+        }
+    }
+
+    /** 真正调 API 的部分, 由 {@link #embedFromApi} 包住重试执行 */
+    private List<float[]> doEmbedFromApi(List<String> texts) {
         List<float[]> result = new ArrayList<>();
         AtomicInteger totalTokens = new AtomicInteger(0);
 
@@ -126,14 +141,6 @@ public class EmbeddingService {
                 texts.size(), totalTokens.get());
 
         return result;
-    }
-
-    /** 重试 3 次后仍失败的兜底方法 */
-    @Recover
-    public List<float[]> embedFromApiFallback(Exception e, List<String> texts) {
-        log.error("[Embedding] 重试3次后仍失败，texts.size={}，error={}",
-                texts.size(), e.getMessage());
-        throw new RuntimeException("Embedding API 调用失败，已重试3次：" + e.getMessage(), e);
     }
 
     /** 单条向量化（查询时使用） */

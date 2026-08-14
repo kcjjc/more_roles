@@ -5,7 +5,6 @@ import org.example.service.UserService;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Configuration;
 import org.springframework.stereotype.Component;
 
 /**
@@ -23,6 +22,11 @@ public class UserTools {
     public String queryUserInfo(@ToolParam(description = "用户的账户") String userAccount) {
         // 去调用service来查询用户信息
         User byUsername = userService.findByUsername(userAccount);
-        return "用户 " + userAccount + " 的信息如下：" + byUsername;
+        if (byUsername == null) {
+            return "用户 " + userAccount + " 不存在";
+        }
+        // 只回显 id / 用户名: 工具返回会进入模型上下文和日志, 密码等敏感字段绝不能出现在这里
+        return "用户 " + userAccount + " 的信息：userId=" + byUsername.getId()
+                + "，username=" + byUsername.getUsername();
     }
 }

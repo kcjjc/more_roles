@@ -62,4 +62,18 @@ public class ParseResult {
                 .build();
     }
 
+    /**
+     * 非分页格式(TXT / DOCX / MD)的便捷构造: 整个文档算第 1 页。
+     */
+    public static ParseResult singlePage(String text) {
+        return ParseResult.builder()
+                .success(true)
+                .pages(List.of(PageContent.builder()
+                        .pageNum(1)
+                        .text(text)
+                        .build()))
+                .totalPages(1)
+                .build();
+    }
+
 }
