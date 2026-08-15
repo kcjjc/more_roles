@@ -33,8 +33,8 @@ public class ChatController {
         this.chatService = chatService;
     }
 
-    /** 新建会话请求体 */
-    public record CreateConversationRequest(String personaId) {
+    /** 新建会话请求体: personaId 必填; kbId 可选, 传了即绑定知识库(会话内消息按需做 RAG 检索) */
+    public record CreateConversationRequest(String personaId, Long kbId) {
     }
 
     /** 发消息请求体 */
@@ -54,16 +54,17 @@ public class ChatController {
 
     /**
      * 新建会话: POST /api/chat/conversations
-     * body: {"personaId":"xxx"}
+     * body: {"personaId":"xxx", "kbId":1}   (kbId 可省略 = 纯人格对话)
      */
     @PostMapping("/conversations")
     public Result<?> createConversation(@RequestBody CreateConversationRequest req) {
         Long userId = StpUtil.getLoginIdAsLong();
         try {
-            Conversation conv = chatService.createConversation(userId, req.personaId());
+            Conversation conv = chatService.createConversation(userId, req.personaId(), req.kbId());
             return Result.ok(Map.of(
                     "conversationId", conv.getId(),
-                    "personaId", conv.getPersonaId()));
+                    "personaId", conv.getPersonaId(),
+                    "kbId", conv.getKbId() == null ? "" : conv.getKbId()));
         } catch (IllegalArgumentException e) {
             return Result.fail(e.getMessage());
         }

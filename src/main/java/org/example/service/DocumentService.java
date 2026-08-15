@@ -11,6 +11,8 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -90,7 +92,29 @@ public class DocumentService {
         return new UploadResult(saved.getId(), fileName, fileType, saved.getStatus());
     }
 
+    /**
+     * 列出知识库内的全部文档(未删除, 按上传时间倒序).
+     * <p>含索引状态/失败原因/分块数等 —— 上传后前端轮询 {@code status} 从 PENDING 变 DONE/FAILED 用.
+     */
+    public List<DocumentOverview> listFiles(Long kbId, Long userId) {
+        knowledgeBaseRepository.findByIdAndCreatedByAndDeletedFalse(kbId, userId)
+                .orElseThrow(() -> new IllegalArgumentException("知识库不存在: kbId=" + kbId));
+        return documentRepository.findByKbIdAndDeletedFalseOrderByUploadedAtDesc(kbId).stream()
+                .map(d -> new DocumentOverview(
+                        d.getId(), d.getFileName(), d.getFileType(), d.getFileSize(),
+                        d.getStatus(), d.getErrorMsg(), d.getChunkCount(), d.getTokenCount(),
+                        d.getVersion(), d.getUploadedAt(), d.getIndexedAt()))
+                .toList();
+    }
+
     /** 上传结果: 文档 id + 初始状态(索引异步进行, 完成后变为 DONE) */
     public record UploadResult(Long docId, String fileName, String fileType, String status) {
+    }
+
+    /** 知识库内文档的概览: 元信息 + 索引状态(列表/轮询用) */
+    public record DocumentOverview(Long docId, String fileName, String fileType, Long fileSize,
+                                   String status, String errorMsg, Integer chunkCount,
+                                   Integer tokenCount, Integer version,
+                                   LocalDateTime uploadedAt, LocalDateTime indexedAt) {
     }
 }

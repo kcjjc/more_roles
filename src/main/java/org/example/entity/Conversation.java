@@ -39,6 +39,10 @@ public class Conversation {
     @Column(name = "persona_id", nullable = false, length = 64)
     private String personaId;
 
+    /** 本次会话绑定的知识库(关联 knowledge_base.id); null = 纯人格对话, 不做 RAG 检索 */
+    @Column(name = "kb_id")
+    private Long kbId;
+
     /** 会话标题: 首轮对话后由大模型总结生成; 首轮结束前可为空 */
     @Column(length = 200)
     private String title;
@@ -113,6 +117,14 @@ public class Conversation {
         this.personaId = personaId;
     }
 
+    public Long getKbId() {
+        return kbId;
+    }
+
+    public void setKbId(Long kbId) {
+        this.kbId = kbId;
+    }
+
     public String getTitle() {
         return title;
     }
@@ -167,6 +179,7 @@ public class Conversation {
                 "id=" + id +
                 ", userId=" + userId +
                 ", personaId='" + personaId + '\'' +
+                ", kbId=" + kbId +
                 ", title='" + title + '\'' +
                 ", summaryLength=" + (summary == null ? 0 : summary.length()) +
                 ", summarizedCount=" + summarizedCount +

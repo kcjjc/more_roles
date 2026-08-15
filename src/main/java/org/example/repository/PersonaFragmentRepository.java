@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 人格信息分片数据访问层.
@@ -24,6 +25,14 @@ public interface PersonaFragmentRepository extends JpaRepository<PersonaFragment
      * 用途: 代码端拿到后按顺序拼接, 还原完整人格信息.
      */
     List<PersonaFragment> findByUserIdAndPersonaIdAndStatusOrderBySeqAsc(
+            Long userId, String personaId, Integer status);
+
+    /**
+     * 取某用户某条人格的【首个有效分片】.
+     * <p>
+     * 用途: 只取分片上冗余的 name(RAG 路由器改写检索句时还原角色指代用), 不必查全部分片.
+     */
+    Optional<PersonaFragment> findFirstByUserIdAndPersonaIdAndStatusOrderBySeqAsc(
             Long userId, String personaId, Integer status);
 
     /**

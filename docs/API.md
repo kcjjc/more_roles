@@ -21,7 +21,7 @@
 - [2. 人格管理接口](#2-人格管理接口)
 - [3. 对话管理接口](#3-对话管理接口)
 - [4. RAG 知识库问答接口](#4-rag-知识库问答接口)
-- [5. 联调测试接口（公开）](#5-联调测试接口公开)
+- [5. 联调测试接口（需登录）](#5-联调测试接口需登录)
 - [数据结构定义](#数据结构定义)
 - [错误码与异常说明](#错误码与异常说明)
 - [附录：典型业务流程](#附录典型业务流程)
@@ -63,8 +63,8 @@ http://localhost:8080
 ### 认证机制（Sa-Token）
 
 - 拦截规则（见 `config/SaTokenConfigure.java`）：
-  - `/api/**` 下**除** `/api/auth/**`（注册/登录/注销）外，**其余接口都必须登录**。
-  - `/test/**` 联调接口**无需登录**。
+  - `/api/**` 与 `/test/**` 下**除** `/api/auth/**`（注册/登录/注销）外，**其余接口都必须登录**。
+  - `/test/**` 曾长期免登录；因 `/test/getUser` 会触发工具调用查询用户信息，现已一并纳入拦截。
 - Token 传递：登录/注册成功后返回 `tokenValue`，后续请求需将其放入：
   - 请求头 `satoken: <tokenValue>`（推荐），**或**
   - Cookie（`is-read-cookie: true`）。
@@ -93,20 +93,21 @@ http://localhost:8080
 | 2.2 | GET | `/api/persona` | 是 | 取回某人格的完整内容 |
 | 2.3 | GET | `/api/persona/list` | 是 | 列出当前用户的全部人格 |
 | 3.1 | GET | `/api/chat/personas/{personaId}/conversations` | 是 | 列出某人格下的会话 |
-| 3.2 | POST | `/api/chat/conversations` | 是 | 新建会话 |
+| 3.2 | POST | `/api/chat/conversations` | 是 | 新建会话（可选绑定知识库做 RAG 对话） |
 | 3.3 | GET | `/api/chat/conversations/{id}` | 是 | 会话详情（含历史消息） |
 | 3.4 | POST | `/api/chat/conversations/{id}/messages` | 是 | 发送消息并获取模型回复 |
 | 3.5 | DELETE | `/api/chat/conversations/{id}` | 是 | 删除会话（连带消息） |
-| 4.1 | POST | `/api/rag/search` | 是 | 纯向量检索（验证召回质量） |
-| 4.2 | POST | `/api/rag/ask` | 是 | 检索增强问答（检索 + 调模型） |
+| 4.1 | POST | `/api/rag/search` | 是 | 纯向量检索（验证召回质量；kbId 需归属当前用户） |
+| 4.2 | POST | `/api/rag/ask` | 是 | 检索增强问答（检索 + 调模型；kbId 需归属当前用户） |
 | 4.3 | GET | `/api/rag/list` | 是 | 列出当前用户的知识库（分页，可按 kbId 筛选） |
 | 4.4 | POST | `/api/rag/kb` | 是 | 新建知识库（同用户下不允许重名） |
 | 4.5 | POST | `/api/rag/kb/{kbId}/document` | 是 | 往知识库上传文档（MinIO + 异步索引） |
-| 5.1 | GET | `/test/hello` | 否 | 默认 ChatClient 联调 |
-| 5.2 | GET | `/test/mao` | 否 | 猫娘人格 ChatClient 联调 |
-| 5.3 | GET | `/test/teacher` | 否 | 读取 `role/teacher.st` 的人格联调 |
-| 5.4 | GET | `/test/users` | 否 | 验证 JPA 连通（查全部用户名） |
-| 5.5 | GET | `/test/getUser` | 否 | 验证工具调用（`UserTools`） |
+| 4.6 | GET | `/api/rag/kb/{kbId}/document` | 是 | 列出知识库内的文件（含索引状态，上传后轮询用） |
+| 5.1 | GET | `/test/hello` | 是 | 默认 ChatClient 联调 |
+| 5.2 | GET | `/test/mao` | 是 | 猫娘人格 ChatClient 联调 |
+| 5.3 | GET | `/test/teacher` | 是 | 读取 `role/teacher.st` 的人格联调 |
+| 5.4 | GET | `/test/users` | 是 | 验证 JPA 连通（查全部用户名） |
+| 5.5 | GET | `/test/getUser` | 是 | 验证工具调用（`UserTools`） |
 
 > ⚠️ 第 5 节为联调/演示接口，直接返回字符串（非 `Result` 信封），**不要在生产前端依赖**。
 
@@ -317,7 +318,9 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 
 模块：`ChatController`，路径前缀 `/api/chat`，**均需登录**。
 
-核心设计：**主路径只调一次 LLM，落库走短事务 + 乐观锁，副作用（历史摘要、会话标题）异步化**。会话使用 **窗口记忆（最近 20 条）+ 窗口外老消息异步压缩进摘要** 的长记忆策略。
+核心设计：**主路径至多两次 LLM 调用（会话绑定知识库时 = 检索路由一次 + 主回复一次，未绑定或路由失败退化为一次），落库走短事务 + 乐观锁，副作用（历史摘要、会话标题）异步化**。会话使用 **窗口记忆（最近 20 条）+ 窗口外老消息异步压缩进摘要** 的长记忆策略。
+
+新建会话时可通过可选的 `kbId` 绑定一个知识库：此后会话内每条消息先经**检索路由器**（小输出 LLM 调用）判定是否需要查库，并把消息改写成适合检索的完整查询（多轮追问的指代补全靠它）；需要检索时，命中片段并入当轮 system 提示词的【参考资料】段。闲聊/算术类消息自动跳过检索。路由失败时自动退回"拿原话检索"，**聊天永不因路由器中断**。检索命中的片段只进当轮 prompt，不会出现在历史消息里。
 
 ### 3.1 列出某人格下的会话
 
@@ -340,6 +343,7 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
       "id": 7,
       "userId": 10,
       "personaId": "a1b2c3d4...",
+      "kbId": 1,
       "title": "关于工作压力的聊天",
       "summary": "用户聊到了最近加班……",
       "summarizedCount": 8,
@@ -354,7 +358,7 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 
 ### 3.2 新建会话
 
-校验人格存在且属于当前用户后创建会话。
+校验人格存在且属于当前用户后创建会话；`kbId` 非空时还会校验知识库存在且属于当前用户，通过后会话即绑定该知识库（见 [3.4 发送消息](#34-发送消息) 的知识库会话说明）。
 
 - **请求**：`POST /api/chat/conversations`
 - **请求头**：`satoken: <tokenValue>`
@@ -364,9 +368,10 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `personaId` | string | 是 | 人格 id |
+| `kbId` | long | 否 | 绑定的知识库 id；`null`/缺省 = 纯人格对话，不做 RAG 检索 |
 
 ```json
-{ "personaId": "a1b2c3d4e5f647008811122233344455" }
+{ "personaId": "a1b2c3d4e5f647008811122233344455", "kbId": 1 }
 ```
 
 - **成功响应**（`data` 字段）：
@@ -375,12 +380,13 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 | --- | --- | --- |
 | `conversationId` | long | 新建会话 id |
 | `personaId` | string | 绑定的人格 id |
+| `kbId` | long/"" | 绑定的知识库 id；未绑定时为 `""` |
 
 ```json
 {
   "code": 200,
   "message": "success",
-  "data": { "conversationId": 8, "personaId": "a1b2c3d4..." }
+  "data": { "conversationId": 8, "personaId": "a1b2c3d4...", "kbId": 1 }
 }
 ```
 
@@ -389,6 +395,7 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 | `message` | 触发条件 |
 | --- | --- |
 | `"人格不存在或已删除"` | `personaId` 不存在或不属于当前用户 |
+| `"知识库不存在: kbId=x"` | `kbId` 不存在 / 已软删除 / 不属于当前用户 |
 
 ### 3.3 会话详情（含历史消息）
 
@@ -408,7 +415,7 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
   "message": "success",
   "data": {
     "conversation": {
-      "id": 8, "userId": 10, "personaId": "a1b2c3d4...",
+      "id": 8, "userId": 10, "personaId": "a1b2c3d4...", "kbId": 1,
       "title": null, "summary": null,
       "summarizedCount": 0, "totalTokens": 0,
       "version": 0,
@@ -441,6 +448,13 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 ### 3.4 发送消息
 
 核心接口：发送一条用户消息，返回模型回复。
+
+> **知识库会话**（`kbId` 非空）行为：
+> - 每条消息先过**检索路由器**（一次小输出 LLM 调用）：判定要不要查库，并把消息改写成适合检索的完整查询。闲聊/算术类消息（如"1+1等于几"）判定为不查，直接回复；
+> - 判定要查时，检索绑定的知识库，命中片段作为【参考资料】并入当轮 system 提示词——模型回答事实性内容时优先依据资料，资料与问题无关则按人格设定正常回答；
+> - 检索命中**只进当轮 prompt**，不会写入历史消息（[3.3 会话详情](#33-会话详情含历史消息) 的 `messages` 里永远只有用户的原话与模型回复）；
+> - 路由失败自动退回"拿原话检索"，接口行为不变，聊天不中断（服务端日志 `[route]` 行可观察判定结果）；
+> - `conversation.totalTokens` 含路由调用的消耗；`message.tokens` 只记主回复调用的消耗。
 
 - **请求**：`POST /api/chat/conversations/{id}/messages`
 - **请求头**：`satoken: <tokenValue>`
@@ -523,7 +537,7 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 
 模块：`RagController`，路径前缀 `/api/rag`，**均需登录**。
 
-> 说明：当前 RAG 侧完成检索、问答、知识库管理（新建/列表）与文档上传，且**未接入对话主路径**（`ChatService` 不查 `doc_chunk`）。文档入库有两条路：启动时 `DataInitializer` 灌入 `classpath:docs/*.txt`（存量），或通过 [4.5 上传接口](#45-往知识库添加文件上传文档) 上传到 MinIO（>5MB 自动分块）。问答按 `kbId` 隔离。
+> 说明：RAG 侧包含检索、问答、知识库管理（新建/列表）与文档上传；对话主路径也已接入检索（见 [3.2 新建会话](#32-新建会话) / [3.4 发送消息](#34-发送消息)——会话绑定 `kbId` 后按需检索）。文档入库有两条路：启动时 `DataInitializer` 灌入 `classpath:docs/*.txt`（存量），或通过 [4.5 上传接口](#45-往知识库添加文件上传文档) 上传到 MinIO（>5MB 自动分块）。本模块检索/问答接口传了 `kbId` 时会校验其归属（不存在/已删/非本人 → `"知识库不存在"`）。
 
 向量检索基于 pgvector 的 cosine 距离（`<=>`），对外分数换算为**相似度**（`1 - 距离`，越大越相关）。Embedding 模型为阿里云 DashScope `text-embedding-v3`（**1024 维**）。
 
@@ -539,7 +553,7 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `query` | string | 是 | 检索问题原文 |
-| `kbId` | long | 否 | 知识库 id；`null` = 全局检索（不限知识库） |
+| `kbId` | long | 否 | 知识库 id，必须属于当前用户；`null` = 全局检索（不限知识库） |
 | `topK` | int | 否 | 召回条数；`null` 或 `≤0` 用默认值（配置 `rag.search.top-k`，默认 5） |
 
 ```json
@@ -572,6 +586,7 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 | `message` | 触发条件 |
 | --- | --- |
 | `"query 不能为空"` | `query` 为空或请求体为 `null` |
+| `"知识库不存在: kbId=x"` | `kbId` 不存在 / 已软删除 / 不属于当前用户 |
 
 ### 4.2 检索增强问答
 
@@ -617,6 +632,7 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 | `message` | 触发条件 |
 | --- | --- |
 | `"query 不能为空"` | `query` 为空或请求体为 `null` |
+| `"知识库不存在: kbId=x"` | `kbId` 不存在 / 已软删除 / 不属于当前用户 |
 | `"模型暂时无响应，请重试"` | 模型调用异常（`IllegalStateException` 兜底） |
 
 ### 4.3 列出当前用户的知识库
@@ -697,7 +713,7 @@ GET /api/rag/list?kbId=1
 
 ### 4.5 往知识库添加文件（上传文档）
 
-上传一个文档到指定知识库：文件分块存入 MinIO（≤5MB 单次 PUT，>5MB 自动 multipart 分块；bucket 不存在自动创建）→ 建 `document` 记录（`PENDING`）→ **异步**解析/分块/向量化（`indexTaskExecutor` 线程池，失败自动重试最多 3 次）。接口立即返回，索引状态后续体现在 `document.status`（暂无状态查询接口，可先查库观察）。
+上传一个文档到指定知识库：文件分块存入 MinIO（≤5MB 单次 PUT，>5MB 自动 multipart 分块；bucket 不存在自动创建）→ 建 `document` 记录（`PENDING`）→ **异步**解析/分块/向量化（`indexTaskExecutor` 线程池，失败自动重试最多 3 次）。接口立即返回，索引状态用 [4.6 文件列表](#46-列出知识库内的文件) 轮询 `status` 观察。
 
 - **请求**：`POST /api/rag/kb/{kbId}/document`
 - **请求头**：`satoken: <tokenValue>`
@@ -735,13 +751,68 @@ curl -X POST http://localhost:8080/api/rag/kb/3/document \
 | `"文件超过大小上限 50MB: xxx"` | 超过单文件上限（与 `spring.servlet.multipart.max-file-size` 一致） |
 | `"MinIO 上传文件失败, ..."` | 对象存储写入异常（不会建档，无脏数据） |
 
+### 4.6 列出知识库内的文件
+
+与 [4.5 上传](#45-往知识库添加文件上传文档) 同路径的 GET 版本。返回该知识库下全部未删除文档的概览（按上传时间倒序），含**索引状态、失败原因、分块数**——上传后前端轮询 `status` 从 `PENDING` → `DONE`/`FAILED` 就用这个接口。
+
+- **请求**：`GET /api/rag/kb/{kbId}/document`
+- **请求头**：`satoken: <tokenValue>`
+- **路径参数**：`kbId` — 知识库 id（必须属于当前用户且未删除）
+
+```
+GET /api/rag/kb/1/document
+```
+
+- **成功响应**：`data` 为 [`DocumentOverview`](#documentoverview) 数组。
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": [
+    {
+      "docId": 7,
+      "fileName": "员工手册.pdf",
+      "fileType": "PDF",
+      "fileSize": 1048576,
+      "status": "DONE",
+      "errorMsg": null,
+      "chunkCount": 23,
+      "tokenCount": 8600,
+      "version": 1,
+      "uploadedAt": "2026-08-15T10:00:00",
+      "indexedAt": "2026-08-15T10:00:42"
+    },
+    {
+      "docId": 8,
+      "fileName": "产品FAQ.docx",
+      "fileType": "DOCX",
+      "fileSize": 524288,
+      "status": "FAILED",
+      "errorMsg": "DOCX 解析失败: ...",
+      "chunkCount": 0,
+      "tokenCount": 0,
+      "version": 1,
+      "uploadedAt": "2026-08-15T10:05:00",
+      "indexedAt": null
+    }
+  ]
+}
+```
+
+- **失败响应**：
+
+| `message` | 触发条件 |
+| --- | --- |
+| `"知识库不存在: kbId=x"` | kbId 不存在 / 已软删除 / 不属于当前用户 |
+
 ---
 
-## 5. 联调测试接口（公开）
+## 5. 联调测试接口（需登录）
 
-模块：`TestController`，路径前缀 `/test`，**无需登录**。
+模块：`TestController`，路径前缀 `/test`，**需登录**（因 `/test/getUser` 会触发工具调用查询用户信息，已与 `/api/**` 一并纳入 Sa-Token 拦截）。
 
-> ⚠️ 这些接口用于联调各 ChatClient Bean 与 JPA 连通性，**直接返回字符串（非 `Result` 信封）**，仅用于开发演示。
+> ⚠️ 这些接口用于联调各 ChatClient Bean 与 JPA 连通性，**直接返回字符串（非 `Result` 信封）**，仅用于开发演示。请求头同样需携带 `satoken: <tokenValue>`。
 
 | # | 方法 | 路径 | 说明 | 返回 |
 | --- | --- | --- | --- | --- |
@@ -770,10 +841,11 @@ curl -X POST http://localhost:8080/api/rag/kb/3/document \
 | `id` | long | 会话 id（主键） |
 | `userId` | long | 发起会话的用户 id |
 | `personaId` | string | 绑定的人格 id |
+| `kbId` | long? | 绑定的知识库 id；`null` = 纯人格对话，不做 RAG 检索（建会话时指定，暂无中途换绑接口） |
 | `title` | string? | 会话标题，首轮对话后**异步**生成，初始为 `null` |
 | `summary` | string? | 历史摘要，窗口外老消息压缩而成，初始为 `null` |
 | `summarizedCount` | int | 已纳入摘要的消息条数（增量摘要进度） |
-| `totalTokens` | int | 本会话累计消耗 token 数 |
+| `totalTokens` | int | 本会话累计消耗 token 数（绑库会话含检索路由调用的消耗） |
 | `version` | int? | 乐观锁版本号（JPA `@Version` 自动维护） |
 | `createdAt` | datetime | 会话创建时间 |
 | `updatedAt` | datetime | 会话最后更新时间（每轮对话刷新） |
@@ -855,6 +927,24 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 | `fileType` | string | 规范化类型：`PDF` / `DOCX` / `MD` / `TXT` |
 | `status` | string | 上传时固定为 `"PENDING"`；异步索引完成后变 `"DONE"`，失败为 `"FAILED"` |
 
+### DocumentOverview
+
+知识库内文档概览 DTO，`DocumentService.DocumentOverview`（record）。出现在 [4.6 文件列表](#46-列出知识库内的文件)。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `docId` | long | 文档 id（`document.id`） |
+| `fileName` | string | 原始文件名 |
+| `fileType` | string | 规范化类型：`PDF` / `DOCX` / `MD` / `TXT` |
+| `fileSize` | long | 文件大小（字节） |
+| `status` | string | 索引状态：`PENDING`（待处理）/ `PROCESSING`（处理中）/ `DONE`（完成）/ `FAILED`（失败） |
+| `errorMsg` | string? | 失败原因，仅 `FAILED` 时有值 |
+| `chunkCount` | int | 索引后的分块数量 |
+| `tokenCount` | int | 向量化消耗的 token 数 |
+| `version` | int | 文档业务版本号（每次重建索引 +1） |
+| `uploadedAt` | datetime | 上传时间 |
+| `indexedAt` | datetime? | 最近一次索引完成时间，未完成过为 `null` |
+
 ### 分页响应结构
 
 [4.3 知识库列表](#43-列出当前用户的知识库) 返回 Spring Data 的 `Page<KbOverviewResult>`，`data` 字段主要结构如下：
@@ -881,7 +971,7 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 | `"操作冲突，请重试"` | `OptimisticLockingFailureException` | 同一会话并发发消息，乐观锁重试 3 次仍失败 |
 | `"模型暂时无响应，请重试"` | `IllegalStateException` | 模型返回空内容或调用异常（RAG/对话兜底） |
 | `"用户名或密码错误"` / `"用户名已存在"` 等 | `IllegalArgumentException` | 业务校验失败，`message` 为具体提示 |
-| `"会话不存在"` / `"无权访问该会话"` / `"人格不存在或已删除"` | `IllegalArgumentException` | 资源归属/存在性校验失败 |
+| `"会话不存在"` / `"无权访问该会话"` / `"人格不存在或已删除"` / `"知识库不存在: kbId=x"` | `IllegalArgumentException` | 资源归属/存在性校验失败 |
 
 > 注：业务校验类 `IllegalArgumentException` 由 `GlobalExceptionHandler` 统一转 `Result.fail(message)`；系统级异常（`NotLoginException`、`OptimisticLockingFailureException`、`IllegalStateException`）同样由全局处理器兜底。
 
@@ -894,7 +984,7 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 ```text
 1. POST /api/auth/register          → 拿到 tokenValue
 2. POST /api/persona/upload         → 拿到 personaId
-   POST /api/chat/conversations     → 拿到 conversationId
+   POST /api/chat/conversations     → 拿到 conversationId（可选传 kbId 绑定知识库, 见流程 C）
 3. POST /api/chat/conversations/{id}/messages  → 拿到模型 reply（可循环）
 4. GET  /api/chat/conversations/{id}           → 拉取历史（title/summary 稍后异步填充）
 5. DELETE /api/chat/conversations/{id}         → 清理
@@ -908,8 +998,26 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 1. POST /api/auth/login             → 拿到 tokenValue
 2. POST /api/rag/kb                 → 新建知识库, 拿到 kbId(已有库可跳过, 用 /api/rag/list 查)
 3. POST /api/rag/kb/{kbId}/document → 上传文档, 返回 PENDING, 索引异步进行
+   GET  /api/rag/kb/{kbId}/document → 轮询文档 status, 变 DONE 后才可检索到内容(FAILED 看 errorMsg)
 4. POST /api/rag/search             → 索引完成后验证召回质量(可选)
 5. POST /api/rag/ask                → 拿到基于文档的 answer + sources
 ```
 
 **请求头**：第 2~5 步均需 `satoken: <tokenValue>`。启动时 `DataInitializer` 灌入的存量文档（`kbId=1`）无需第 2、3 步即可直接检索/问答。
+
+### C. 绑定知识库的人格对话流程（RAG + 人格 + 记忆）
+
+```text
+1. POST /api/auth/login                        → 拿到 tokenValue
+2. POST /api/persona/upload                    → 拿到 personaId(给角色一段设定/口吻)
+3. POST /api/rag/kb + /api/rag/kb/{kbId}/document → 建库并上传背景故事/设定文档
+   GET  /api/rag/kb/{kbId}/document               → 轮询 status 至 DONE (FAILED 看 errorMsg)
+   (也可复用已有知识库, 用 /api/rag/list 查)
+4. POST /api/chat/conversations                → body 传 personaId + kbId, 拿到 conversationId
+5. POST /api/chat/conversations/{id}/messages  → 正常聊天:
+   - 问"1+1等于几"这类闲聊  → 路由判定不查库, 人格直接回
+   - 问"你的背景故事是什么"  → 路由判定要查, 检索设定文档, 回答有据
+   - 追问"那后来呢"          → 路由结合上文改写检索句后再查, 指代可被补全
+```
+
+**请求头**：第 2~5 步均需 `satoken: <tokenValue>`。与流程 A/B 的区别：检索由服务端路由器按消息内容自动决定，调用方无感知；`kbId` 只在建会话时传一次，消息接口的请求/响应形状与未绑库会话完全一致。

@@ -47,7 +47,7 @@ public class ChatModelLoggingAdvisor implements CallAdvisor {
     private static final Logger log = LoggerFactory.getLogger(ChatModelLoggingAdvisor.class);
 
     @Override
-    public String getName() {
+    public @NotNull String getName() {
         return getClass().getSimpleName();
     }
 
@@ -135,7 +135,7 @@ public class ChatModelLoggingAdvisor implements CallAdvisor {
     /** 取本次总 token, 取不到返回 null */
     private Integer totalTokens(ChatResponse chatResponse) {
         try {
-            if (chatResponse.getMetadata() != null && chatResponse.getMetadata().getUsage() != null) {
+            if (chatResponse.getMetadata().getUsage() != null) {
                 return chatResponse.getMetadata().getUsage().getTotalTokens();
             }
         } catch (Exception e) {

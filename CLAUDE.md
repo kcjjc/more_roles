@@ -26,8 +26,8 @@ mvn test -Dtest=类名#方法名    # 跑单个测试
 ## 架构要点
 
 ### 1. 对话主路径（`ChatService.chat`）
-核心设计是"**主路径只调一次 LLM，落库走短事务 + 乐观锁，副作用异步化**"：
-- 流程：`读上下文(人格 + 摘要) → 调主模型(事务外) → 短事务落库 user/assistant 消息 + token → 异步投递摘要/标题`
+核心设计是"**主路径至多两次 LLM（绑库会话 = 路由一次 + 主回复一次，未绑库/路由失败退化为一次），落库走短事务 + 乐观锁，副作用异步化**"：
+- 流程：`读上下文(人格 + 摘要) → (绑库时: RagRouterService 路由判定 + RetrievalService 检索) → 调主模型(事务外) → 短事务落库 user/assistant 消息 + token → 异步投递摘要/标题`
 - 人格按需 `.system(persona)` 注入，用的是 `ChatService` 内部构建的、**不带 defaultSystem 的 ChatClient**。
 - 记忆：`MessageWindowChatMemory`（窗口 20 条，底层走 `JpaChatMemoryRepository` 读 message 表）+ 窗口外的老消息异步压缩进 `conversation.summary`，摘要并入 system 发给模型。
 - 并发安全：`Conversation.version` 乐观锁，落库 / 写摘要 / 写标题均带 3 次重试；摘要靠游标 `summarized_count` 幂等推进。
@@ -42,6 +42,7 @@ mvn test -Dtest=类名#方法名    # 跑单个测试
 - **分块**（`ChunkService`）：有章节结构走 `StructureAwareChunkSplitter`，否则走 `SlidingWindowChunkSplitter`；默认 512 字 / 64 重叠，过滤掉 <20 字的碎片。
 - **向量化**（`EmbeddingService`）：先查 Redis 缓存（key = 文本 MD5，前缀 `emb:v1:`，TTL 默认 7d），未命中批量调 API（20 条/批，`RetryTemplate` 3 次指数退避——编程式重试，勿改回 `@Retryable`：`embedBatch` 自调用会绕过 AOP 代理使注解失效）。向量按逗号分隔字符串存 Redis（**不用** JSON 序列化器，避免浮点被当类名解析）。
 - **落库**：删旧版本分块（按 `doc_version`）→ `saveAll` 写 `DocChunk`（embedding 已 set）→ 更新 `document` / `index_task` 状态。失败走指数退避重试（`LoadService.retryIfPossible`）。
+- **对话侧检索（`ChatService`，2026-08 起）**：绑库会话每条消息先过 `RagRouterService`（判定要不要查 + 结合最近对话改写检索句，多轮追问的指代补全靠它），需要才调 `RetrievalService.search`；命中拼进 system 的【参考资料】段。`/api/rag/search`、`/ask` 已加 kbId 归属校验（`RagService.requireOwnedKb`）。
 - 启动时 `DataInitializer` 会把 `classpath:docs/*.txt` 灌进去（`document` 表为空时）。
 
 ### 4. 认证（Sa-Token）
@@ -57,8 +58,8 @@ mvn test -Dtest=类名#方法名    # 跑单个测试
 - **多个 ChatClient Bean 共存**：`number1ChatClient`（猫娘内置 prompt）/ `catGirlChatClient`（读 `classpath:role/cat_girl.st`）/ `toolChatClient`（装配 `WeatherTools` + `UserTools`）。生产对话用的是 `ChatService` 内部构建的匿名 client。`TestController`（`/test/**`，**需登录**——因 `/test/getUser` 会触发 `UserTools` 查用户，2026-08 起与 `/api/**` 一并纳入 Sa-Token 拦截）是各 client + JPA 连通性的联调入口。
 - **工具是静态装配**：`@Tool` 声明在 `WeatherTools` / `UserTools` 上，由 `ToolChatClientConfig` 固定挂到 `toolChatClient`，不是按对话动态过滤。
 - **`@Async` 跨 Bean**：新增异步副作用务必放独立 Bean，否则代理不生效。
-- **MinIO**：`MinioStorageService.upload`（>5MB 自动 multipart 分块，bucket 不存在自动建）与 `download` 已实现；REST 上传入库走 `POST /api/rag/kb/{kbId}/document`（`DocumentService` → MinIO → 建档 → 异步索引）。`delete` 仍是占位，删除文档功能待做。遗留：`DataInitializer` 灌的存量文档 minioPath 是假的（文件不在 MinIO），其重试路径（`executeFromMinio`）会下载失败。
-- **RAG 检索尚未接入对话**：`ChatService` 里没有 RAG advisor，对话目前不查 `doc_chunk`；RAG 侧只有入库（ETL）部分完成。
+- **MinIO**：`MinioStorageService.upload`（>5MB 自动 multipart 分块，bucket 不存在自动建）与 `download` 已实现；REST 上传入库走 `POST /api/rag/kb/{kbId}/document`（`DocumentService` → MinIO → 建档 → 异步索引），同路径 GET 返回库内文档列表（含索引状态，上传后轮询用）。`delete` 仍是占位，删除文档功能待做。遗留：`DataInitializer` 灌的存量文档 minioPath 是假的（文件不在 MinIO），其重试路径（`executeFromMinio`）会下载失败。
+- **会话绑定知识库**：`conversation.kb_id` 可空列，建会话时校验归属（`CreateConversationRequest` 带 `kbId`）。绑库消息经路由器按需检索；**检索命中只进当轮 prompt，绝不写成 message 落库**（否则挤占记忆窗口 + 被异步摘要污染）。路由失败 / `rag.route.enabled=false` 自动退回"拿原话总是检索"。路由 token 计入 `conversation.total_tokens`，`message.tokens` 只记主调用。
 - **密钥明文写在 `application.yaml`**：DB / Redis / MinIO / LLM 的密码与 api-key 都是明文，且该文件尚未加入 git。
 
 ## 代码组织

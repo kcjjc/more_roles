@@ -88,6 +88,20 @@ public class PersonaService {
     }
 
     /**
+     * 取某条人格的【名称】(取首个有效分片上冗余的 name).
+     *
+     * @return 名称; 该 personaId 不存在、已全部软删或从未设置过 name 时返回 empty
+     */
+    @Transactional(readOnly = true)
+    public Optional<String> getPersonaName(Long userId, String personaId) {
+        return fragmentRepository
+                .findFirstByUserIdAndPersonaIdAndStatusOrderBySeqAsc(
+                        userId, personaId, PersonaFragment.STATUS_ACTIVE)
+                .map(PersonaFragment::getName)
+                .filter(name -> name != null && !name.isBlank());
+    }
+
+    /**
      * 列出某用户的【全部有效人格】概览(每个 personaId 一条).
      *
      * @return 概览列表

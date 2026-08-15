@@ -50,6 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_pf_user_persona ON persona_fragment (user_id, per
 -- 具体的每一轮对话消息存在下面的 message 子表(每条消息一行).
 --   * user_id          发起会话的用户.
 --   * persona_id       本次会话使用的人格(逻辑关联 persona_fragment.persona_id).
+--   * kb_id            本次会话绑定的知识库(关联 knowledge_base.id); NULL = 纯人格对话, 不做 RAG 检索.
 --   * title            会话标题: 首轮对话后由大模型总结第一次会话内容生成(首轮结束前为 NULL).
 --   * summary          历史摘要: 窗口外的老消息压缩成的一段摘要, 实现"长会话记忆".
 --   * summarized_count 已纳入摘要的消息条数, 用于增量摘要的进度追踪.
@@ -57,11 +58,13 @@ CREATE INDEX IF NOT EXISTS idx_pf_user_persona ON persona_fragment (user_id, per
 --   * version          乐观锁版本号: 防止同一会话并发发消息时 token/summary 丢失更新.
 --   * created_at       会话发起时间; updated_at 每追加一轮对话刷新一次.
 -- 注: persona_id 不建物理外键 —— persona_fragment.persona_id 非唯一(多片共享), 无法做 FK 目标,
---     这里仅逻辑关联, 与 persona_fragment → users 的处理保持一致.
+--     这里仅逻辑关联, 与 persona_fragment → users 的处理保持一致;
+--     kb_id 同样仅逻辑关联(且 knowledge_base 建表在后), 不设物理外键.
 CREATE TABLE IF NOT EXISTS conversation (
     id               BIGSERIAL     PRIMARY KEY,
     user_id          BIGINT        NOT NULL,                       -- 发起会话的用户(关联 users.id)
     persona_id       VARCHAR(64)   NOT NULL,                       -- 本次会话使用的人格(关联 persona_fragment.persona_id)
+    kb_id            BIGINT,                                        -- 本次会话绑定的知识库(关联 knowledge_base.id); NULL = 纯人格对话
     title            VARCHAR(200),                                 -- 会话标题: 首轮对话后总结生成
     summary          TEXT,                                         -- 历史摘要: 窗口外老消息压缩成的一段摘要
     summarized_count INTEGER       NOT NULL DEFAULT 0,             -- 已纳入摘要的消息条数(增量摘要进度)

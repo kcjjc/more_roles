@@ -130,6 +130,18 @@ public class RagService {
         return new KbOverviewResult(saved.getId(), saved.getName(), saved.getDescription());
     }
 
+    /**
+     * kbId 非空时校验其存在且属于当前用户(未删除), 不通过抛 IllegalArgumentException(全局 handler 转 Result).
+     * search / ask 等检索入口调用, 防止跨用户读别人库里的文档.
+     */
+    public void requireOwnedKb(Long userId, Long kbId) {
+        if (kbId == null) {
+            return;  // null = 全局检索, 保持现状
+        }
+        knowledgeBaseRepository.findByIdAndCreatedByAndDeletedFalse(kbId, userId)
+                .orElseThrow(() -> new IllegalArgumentException("知识库不存在: kbId=" + kbId));
+    }
+
 
     /** 问答结果: 模型回答 + 命中来源(让前端/调用方能核验依据) */
     public record AskResult(String answer, List<ChunkHit> sources) {

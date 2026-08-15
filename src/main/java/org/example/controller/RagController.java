@@ -63,6 +63,7 @@ public class RagController {
         if (req == null || req.query() == null || req.query().isBlank()) {
             return Result.fail("query 不能为空");
         }
+        ragService.requireOwnedKb(StpUtil.getLoginIdAsLong(), req.kbId());
         return Result.ok(retrievalService.search(req.query(), req.kbId(), req.topK()));
     }
 
@@ -76,6 +77,7 @@ public class RagController {
         if (req == null || req.query() == null || req.query().isBlank()) {
             return Result.fail("query 不能为空");
         }
+        ragService.requireOwnedKb(StpUtil.getLoginIdAsLong(), req.kbId());
         return Result.ok(ragService.ask(req.query(), req.kbId(), req.topK()));
     }
 
@@ -121,5 +123,16 @@ public class RagController {
             return Result.fail("file 不能为空");
         }
         return Result.ok(documentService.addFile(kbId, StpUtil.getLoginIdAsLong(), file));
+    }
+
+    /**
+     * 列出知识库内的文件: GET /api/rag/kb/{kbId}/document
+     * <p>与上传同路径(GET 列表 / POST 上传). 返回文件名/类型/大小/索引状态(含失败原因)/分块数等,
+     * 上传后前端轮询 status 从 PENDING → DONE/FAILED 用.
+     */
+    @GetMapping("/kb/{kbId}/document")
+    public Result<List<org.example.service.DocumentService.DocumentOverview>> listDocuments(
+            @PathVariable Long kbId) {
+        return Result.ok(documentService.listFiles(kbId, StpUtil.getLoginIdAsLong()));
     }
 }
