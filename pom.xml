@@ -9,23 +9,36 @@
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
         <version>3.5.11</version>
+        <relativePath/>
     </parent>
 
     <groupId>org.example</groupId>
     <artifactId>more_roles</artifactId>
     <version>1.0-SNAPSHOT</version>
+    <!-- 父 pom 只管版本与模块聚合，不含代码 -->
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>common</module>
+        <module>chat-service</module>
+        <module>rag-service</module>
+        <module>gateway</module>
+    </modules>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <spring-ai.version>1.1.2</spring-ai.version>
         <java.version>21</java.version>
+        <spring-ai.version>1.1.2</spring-ai.version>
+        <spring-cloud.version>2025.0.0</spring-cloud.version>
+        <sa-token.version>1.44.0</sa-token.version>
     </properties>
 
-    <!-- Spring AI BOM：统一管理 spring-ai 所有子模块的版本 -->
+    <!-- 统一版本管理：子模块引依赖一律不写版本号 -->
     <dependencyManagement>
         <dependencies>
+            <!-- Spring AI BOM：统一管理 spring-ai 所有子模块的版本 -->
             <dependency>
                 <groupId>org.springframework.ai</groupId>
                 <artifactId>spring-ai-bom</artifactId>
@@ -33,119 +46,68 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <!-- Spring Cloud BOM：只给 gateway 用(SCG)，轻量方案不引注册中心 -->
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- 内部模块 -->
+            <dependency>
+                <groupId>org.example</groupId>
+                <artifactId>common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <!-- Sa-Token(登录认证)：多服务共享会话需要 redis 集成包 -->
+            <dependency>
+                <groupId>cn.dev33</groupId>
+                <artifactId>sa-token-core</artifactId>
+                <version>${sa-token.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>cn.dev33</groupId>
+                <artifactId>sa-token-spring-boot3-starter</artifactId>
+                <version>${sa-token.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>cn.dev33</groupId>
+                <artifactId>sa-token-redis-jackson</artifactId>
+                <version>${sa-token.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>cn.dev33</groupId>
+                <artifactId>sa-token-reactor-spring-boot3-starter</artifactId>
+                <version>${sa-token.version}</version>
+            </dependency>
+            <!-- 文档解析(仅 rag-service 使用) -->
+            <dependency>
+                <groupId>io.minio</groupId>
+                <artifactId>minio</artifactId>
+                <version>8.5.13</version>
+            </dependency>
+            <!-- @NotNull 等空值标注(单体时代由 PDFBox 传递提供, 拆分后 chat-service 显式声明) -->
+            <dependency>
+                <groupId>org.jetbrains</groupId>
+                <artifactId>annotations</artifactId>
+                <version>24.1.0</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.pdfbox</groupId>
+                <artifactId>pdfbox</artifactId>
+                <version>3.0.3</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.poi</groupId>
+                <artifactId>poi-ooxml</artifactId>
+                <version>5.3.0</version>
+            </dependency>
+            <dependency>
+                <groupId>com.vladsch.flexmark</groupId>
+                <artifactId>flexmark-all</artifactId>
+                <version>0.64.8</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
-
-
-    <dependencies>
-        <!-- Web -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
-        <!--
-            OpenAI Starter：支持 OpenAI 及所有兼容接口（DeepSeek、Moonshot 等）
-            引入后自动配置 ChatModel、EmbeddingModel 等 Bean
-        -->
-        <dependency>
-            <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-starter-model-openai</artifactId>
-        </dependency>
-        <!-- JPA: ORM 框架(Hibernate),面向对象操作数据库 -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jpa</artifactId>
-        </dependency>
-        <!-- hibernate-vector:让 Hibernate 认识 pgvector 的 vector 类型
-             (配合 DocChunk 上的 @JdbcTypeCode(SqlTypes.VECTOR));
-             没有它 Hibernate 会把 float[] 当 bytea,报 vector/bytea 类型不匹配 -->
-        <dependency>
-            <groupId>org.hibernate.orm</groupId>
-            <artifactId>hibernate-vector</artifactId>
-            <version>${hibernate.version}</version>
-        </dependency>
-        <!-- PostgreSQL JDBC 驱动:Java 连 PG 的底层驱动,版本由 spring-boot-parent 管理 -->
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-        <!-- Sa-Token: 轻量级权限认证框架(登录认证 / 会话 / 路由拦截), 适配 Spring Boot 3 -->
-        <dependency>
-            <groupId>cn.dev33</groupId>
-            <artifactId>sa-token-spring-boot3-starter</artifactId>
-            <version>1.44.0</version>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-
-        <!-- ========== 工具库 ========== -->
-        <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <optional>true</optional>
-        </dependency>
-
-        <!-- ========== Redis ========== -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-redis</artifactId>
-        </dependency>
-        <!-- 连接池 -->
-        <dependency>
-            <groupId>org.apache.commons</groupId>
-            <artifactId>commons-pool2</artifactId>
-        </dependency>
-        <!-- Embedding API 调用重试(RetryTemplate); 此前只是 spring-ai 的传递依赖,
-             主代码直接使用其类, 改为显式声明; 版本由 spring-boot-parent 管理 -->
-        <dependency>
-            <groupId>org.springframework.retry</groupId>
-            <artifactId>spring-retry</artifactId>
-        </dependency>
-        <!-- ========== MinIO（文件存储） ========== -->
-        <dependency>
-            <groupId>io.minio</groupId>
-            <artifactId>minio</artifactId>
-            <version>8.5.13</version>
-        </dependency>
-        <!-- ========== 文档解析 ========== -->
-        <!-- PDF 解析 -->
-        <dependency>
-            <groupId>org.apache.pdfbox</groupId>
-            <artifactId>pdfbox</artifactId>
-            <version>3.0.3</version>
-        </dependency>
-        <!-- Word(.docx) 解析 -->
-        <dependency>
-            <groupId>org.apache.poi</groupId>
-            <artifactId>poi-ooxml</artifactId>
-            <version>5.3.0</version>
-        </dependency>
-        <!-- Markdown 解析（转纯文本） -->
-        <dependency>
-            <groupId>com.vladsch.flexmark</groupId>
-            <artifactId>flexmark-all</artifactId>
-            <version>0.64.8</version>
-        </dependency>
-    </dependencies>
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-                <configuration>
-                    <excludes>
-                        <exclude>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                        </exclude>
-                    </excludes>
-                </configuration>
-            </plugin>
-        </plugins>
-    </build>
-
 </project>

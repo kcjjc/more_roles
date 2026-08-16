@@ -1,0 +1,88 @@
+# 全栈编排: 基础设施 + 三个 Java 服务。
+# 前置:
+#   1. mvn -DskipTests package   (三个 jar 打包完成)
+#   2. 导出密钥环境变量(见 README 环境变量表; 缺失时 compose 会直接报错提示)
+# 启动: docker compose up -d --build
+# 停止: docker compose down (加 -v 连同数据卷一起清)
+
+services:
+  # ---------- 基础设施 ----------
+  postgres:
+    # pgvector 官方镜像, 自带 vector 扩展
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: more_roles
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${APP_DB_PASSWORD:?请设置 APP_DB_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${APP_REDIS_PASSWORD:?请设置 APP_REDIS_PASSWORD}"]
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?请设置 MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"   # S3 API(rag-service 用)
+      - "9001:9001"   # 控制台
+
+  # ---------- 业务服务 ----------
+  rag-service:
+    build: ./rag-service
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?请设置 DEEPSEEK_API_KEY}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:?请设置 EMBEDDING_API_KEY}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/more_roles?currentSchema=rag_svc,public
+      SPRING_DATASOURCE_PASSWORD: ${APP_DB_PASSWORD}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: ${APP_REDIS_PASSWORD}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  chat-service:
+    build: ./chat-service
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?请设置 DEEPSEEK_API_KEY}
+      # 容器网络内用服务名寻址 rag-service(轻量方案: 显式地址, 不引注册中心)
+      RAG_BASE_URL: http://rag-service:8082
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/more_roles?currentSchema=chat_svc
+      SPRING_DATASOURCE_PASSWORD: ${APP_DB_PASSWORD}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: ${APP_REDIS_PASSWORD}
+    depends_on:
+      - postgres
+      - redis
+      - rag-service
+
+  gateway:
+    build: ./gateway
+    environment:
+      CHAT_BASE_URL: http://chat-service:8081
+      RAG_BASE_URL: http://rag-service:8082
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: ${APP_REDIS_PASSWORD}
+    ports:
+      - "8080:8080"   # 唯一对外入口
+    depends_on:
+      - chat-service
+      - rag-service
+
+volumes:
+  pg_data:
+  minio_data:
