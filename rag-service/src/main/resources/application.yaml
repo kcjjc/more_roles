@@ -1,0 +1,75 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: rag-service
+  ai:
+    openai:
+      base-url: https://api.deepseek.com           # /ask 端点的对话模型走 DeepSeek
+      api-key: ${DEEPSEEK_API_KEY:}                # 密钥不落盘, 见 README 环境变量表
+      chat:
+        options:
+          model: deepseek-v4-flash
+      embedding:
+        # 默认走阿里云 DashScope 兼容模式; 用专属 MaaS 实例的话换成自己的地址。
+        # 不要以 /v1 结尾: 实际路径是 /compatible-mode/v1/embeddings, Spring AI 自己补 /v1
+        base-url: ${EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode}
+        api-key: ${EMBEDDING_API_KEY:}
+        options:
+          model: text-embedding-v3
+
+  # ===== 文件上传(RAG 文档上传接口用; 单文件默认仅 1MB, 必须放大) =====
+  servlet:
+    multipart:
+      max-file-size: 50MB        # 与 DocumentService.MAX_FILE_SIZE 保持一致
+      max-request-size: 55MB     # 整个请求上限, 略大于单文件以容纳表单开销
+
+  # ===== 数据库(PostgreSQL)配置: knowledge_base/document/doc_chunk/index_task(独立 schema rag_svc) =====
+  datasource:
+    # currentSchema 带上 public: pgvector 扩展(vector 类型)装在 public, search_path 必须包含它
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:more_roles}?currentSchema=rag_svc,public
+    username: ${DB_USERNAME:postgres}
+    password: ${APP_DB_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update         # 实体改了自动同步表结构(开发友好);生产建议 validate 或 none
+    show-sql: false
+
+  # ========== Redis: Sa-Token 共享会话 + embedding 缓存 ==========
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${APP_REDIS_PASSWORD:}
+      database: 1
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+
+# ===== Sa-Token 配置: 必须与 chat-service 保持一致, 会话才能互通 =====
+sa-token:
+  token-name: satoken
+  timeout: 2592000
+  active-timeout: -1
+  is-share: false
+  token-style: uuid
+  is-log: false
+  is-read-cookie: true
+  is-read-header: true
+
+# ========== MinIO ==========
+minio:
+  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+  access-key: ${MINIO_ACCESS_KEY:admin}
+  secret-key: ${MINIO_SECRET_KEY:}
+  bucket: system
+
+# ========== RAG 检索参数(检索在本服务执行, 阈值过滤也在这里) ==========
+rag:
+  search:
+    top-k: 5               # 检索召回条数(调用方未显式传 topK 时的默认值)
+    min-score: 0.35        # 相似度阈值: 低于该分的命中不返回(防上下文污染)

@@ -44,11 +44,15 @@
 
 | 变量 | 用途 | 需要的服务 |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | chat 模型（DeepSeek，rag 的 `/ask` 也用） | chat / rag |
-| `EMBEDDING_API_KEY` | 向量模型（阿里云 text-embedding-v3） | rag |
-| `APP_DB_PASSWORD` | PostgreSQL 密码 | chat / rag |
-| `APP_REDIS_PASSWORD` | Redis 密码 | chat / rag / gateway |
-| `MINIO_SECRET_KEY` | MinIO 密钥 | rag |
+| `DEEPSEEK_API_KEY` | chat 模型（DeepSeek，rag 的 `/ask` 也用），必填 | chat / rag |
+| `EMBEDDING_API_KEY` | 向量模型（阿里云 text-embedding-v3），必填 | rag |
+| `APP_DB_PASSWORD` | PostgreSQL 密码，必填 | chat / rag |
+| `APP_REDIS_PASSWORD` | Redis 密码，必填 | chat / rag / gateway |
+| `MINIO_SECRET_KEY` | MinIO 密钥，必填 | rag |
+| `EMBEDDING_BASE_URL` | 向量模型入口（默认阿里云 DashScope 兼容模式） | rag |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USERNAME` | PostgreSQL 地址（默认 `localhost:5432/more_roles`，用户 `postgres`） | chat / rag |
+| `REDIS_HOST` / `REDIS_PORT` | Redis 地址（默认 `localhost:6379`） | chat / rag / gateway |
+| `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` | MinIO 地址与账号（默认 `http://localhost:9000` / `admin`） | rag |
 | `RAG_BASE_URL` | rag 地址（默认 `http://localhost:8082`） | chat / gateway |
 | `CHAT_BASE_URL` | chat 地址（默认 `http://localhost:8081`） | gateway |
 

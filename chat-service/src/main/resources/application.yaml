@@ -1,0 +1,57 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: chat-service
+  ai:
+    openai:
+      base-url: https://api.deepseek.com           # chat 走 DeepSeek
+      api-key: ${DEEPSEEK_API_KEY:}                # 密钥不落盘, 见 README 环境变量表; 缺失时对话接口 401
+      chat:
+        options:
+          model: deepseek-v4-flash
+
+  # ===== 数据库(PostgreSQL)配置: user/conversation/message/persona_fragment(独立 schema chat_svc) =====
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:more_roles}?currentSchema=chat_svc
+    username: ${DB_USERNAME:postgres}
+    password: ${APP_DB_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update         # 实体改了自动同步表结构(开发友好);生产建议 validate 或 none
+    show-sql: false
+
+  # ========== Redis: Sa-Token 共享会话(登录动作在本服务, rag-service 同库校验) ==========
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${APP_REDIS_PASSWORD:}
+      database: 1
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+
+# ===== Sa-Token 配置(登录态 / 权限). 必须与 rag-service 保持一致, 会话才能互通 =====
+sa-token:
+  token-name: satoken          # token 在 cookie / header 里的名字(前端请求头用这个)
+  timeout: 2592000             # token 有效期(秒), 30 天
+  active-timeout: -1           # 临时有效期, -1 表示不校验
+  is-share: false              # 多人同账号登录是否共用一个 token
+  token-style: uuid            # token 风格
+  is-log: false                # 关闭框架日志, 避免刷屏
+  is-read-cookie: true         # 允许从 cookie 读取 token
+  is-read-header: true         # 允许从 header 读取 token
+
+# ========== RAG(跨服务调用 rag-service) ==========
+rag:
+  service:
+    base-url: ${RAG_BASE_URL:http://localhost:8082}   # rag-service 地址(容器内用服务名)
+  route:
+    enabled: true          # 检索路由总开关: false = 绑库会话每条消息都拿原话检索(无路由的兜底行为)
+    context-turns: 6       # 路由器可见的最近对话轮数(含助手回复, 用于改写时补全指代)
+    model: ""              # 路由用模型; 空 = 用主 chat 模型(deepseek-v4-flash)

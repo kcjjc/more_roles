@@ -1,0 +1,41 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            # 对话域 → chat-service
+            - id: chat-service
+              uri: ${CHAT_BASE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/auth/**,/api/chat/**,/api/persona/**,/test/**
+            # 知识库域 → rag-service
+            - id: rag-service
+              uri: ${RAG_BASE_URL:http://localhost:8082}
+              predicates:
+                - Path=/api/rag/**
+          # /internal/** 没有路由 = 外部流量经网关永远到不了服务间内部接口
+
+  # ========== Redis: 校验 Sa-Token 共享会话(登录在 chat-service, 会话三个服务共享) ==========
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${APP_REDIS_PASSWORD:}
+      database: 1
+
+# ===== Sa-Token 配置: 必须与 chat/rag 保持一致, 会话才能互通 =====
+sa-token:
+  token-name: satoken
+  timeout: 2592000
+  active-timeout: -1
+  is-share: false
+  token-style: uuid
+  is-log: false
+  is-read-cookie: true
+  is-read-header: true

@@ -38,3 +38,13 @@ build/
 
 ### Mac OS ###
 .DS_Store
+### 本地真实配置(含密钥/IP, 仅本地使用, 勿提交) ###
+**/application-test.yaml
+**/application-test.yml
+
+### docker compose 密钥文件 ###
+.env
+
+### 个人面试准备文档, 不随仓库公开 ###
+docs/JVM面试问答.md
+docs/面试问答十题.md
