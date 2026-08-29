@@ -22,6 +22,7 @@
 - [3. 对话管理接口](#3-对话管理接口)
 - [4. RAG 知识库问答接口](#4-rag-知识库问答接口)
 - [5. 联调测试接口（需登录）](#5-联调测试接口需登录)
+- [6. A2A 协议接口（不经网关）](#6-a2a-协议接口不经网关)
 - [数据结构定义](#数据结构定义)
 - [错误码与异常说明](#错误码与异常说明)
 - [附录：典型业务流程](#附录典型业务流程)
@@ -59,7 +60,7 @@ http://localhost:8080
 - 成功：`Result.ok(data)` → `code=200, message="success"`
 - 失败：`Result.fail(message)` → `code=500, message=<错误提示>, data=null`
 - 即便抛出异常，也由 `GlobalExceptionHandler` 收口为同一信封，**不会返回裸 500 + 堆栈**。
-- ⚠️ 唯一例外：[3.5 发送消息（流式）](#35-发送消息流式) 返回的是 **SSE 帧流**（`text/event-stream`），不走 `Result` 信封——错误以 `error` 帧交付（该请求的 Accept 无法与 JSON 协商 content-type）。
+- ⚠️ 两个例外不走 `Result` 信封：[3.5 发送消息（流式）](#35-发送消息流式) 返回 **SSE 帧流**（错误以 `error` 帧交付，该请求的 Accept 无法与 JSON 协商 content-type）；第 6 节 **A2A 协议接口**说的是协议自己的格式（`application/a2a+json` + google.rpc.Status 错误体）。
 
 ### 认证机制（Sa-Token）
 
@@ -105,13 +106,18 @@ http://localhost:8080
 | 4.4 | POST | `/api/rag/kb` | 是 | 新建知识库（同用户下不允许重名） |
 | 4.5 | POST | `/api/rag/kb/{kbId}/document` | 是 | 往知识库上传文档（MinIO + 异步索引） |
 | 4.6 | GET | `/api/rag/kb/{kbId}/document` | 是 | 列出知识库内的文件（含索引状态，上传后轮询用） |
+| 4.7 | DELETE | `/api/rag/kb/{kbId}/document/{docId}` | 是 | 删除知识库内的文档（软删文档 + 物理删分块 + 清 MinIO 对象） |
 | 5.1 | GET | `/test/hello` | 是 | 默认 ChatClient 联调 |
 | 5.2 | GET | `/test/mao` | 是 | 猫娘人格 ChatClient 联调 |
 | 5.3 | GET | `/test/teacher` | 是 | 读取 `role/teacher.st` 的人格联调 |
 | 5.4 | GET | `/test/users` | 是 | 验证 JPA 连通（查全部用户名） |
 | 5.5 | GET | `/test/getUser` | 是 | 验证工具调用（`UserTools`） |
+| 6.1 | GET | `/.well-known/agent-card.json` | 公开 | A2A Agent Card（发现入口，rag 直连 8082） |
+| 6.2 | POST | `/message:send` | A2A | A2A 发消息：知识库问答（X-Api-Key） |
+| 6.3 | GET | `/tasks/{id}` | A2A | A2A 查询任务（X-Api-Key） |
 
 > ⚠️ 第 5 节为联调/演示接口，直接返回字符串（非 `Result` 信封），**不要在生产前端依赖**。
+> ⚠️ 第 6 节是 A2A 协议端点：**不经网关**（直连 rag-service `:8082`）、鉴权用 `X-Api-Key`（非 satoken），详见 [6. A2A 协议接口](#6-a2a-协议接口不经网关)。
 
 ---
 
@@ -863,6 +869,41 @@ GET /api/rag/kb/1/document
 | --- | --- |
 | `"知识库不存在: kbId=x"` | kbId 不存在 / 已软删除 / 不属于当前用户 |
 
+### 4.7 删除知识库内的文件
+
+删除一个文档。**删除语义**：`doc_chunk` 分块**物理删除**（检索 SQL 不 join `document` 表，分块不删则检索仍命中——这是"删除后立即检索不到"的保障）；`document` 记录**软删除**（保留可追溯，列表/轮询自动消失）；MinIO 源文件在事务提交后清理，**清理失败仅记录告警不影响删除结果**（对象残留只是浪费存储；`removeObject` 幂等，对象不存在不报错）。
+
+`PENDING` / `PROCESSING` 状态的文档拒绝删除（索引异步进行中）；删除瞬间仍在跑的索引任务由 `LoadService` 的"已删除守卫"兜底取消，不会把分块写回。
+
+- **请求**：`DELETE /api/rag/kb/{kbId}/document/{docId}`
+- **请求头**：`satoken: <tokenValue>`
+- **路径参数**：`kbId` — 知识库 id（必须属于当前用户且未删除）；`docId` — 文档 id（必须属于该库且未删除）
+
+```bash
+curl -X DELETE http://localhost:8080/api/rag/kb/1/document/7 \
+  -H "satoken: <tokenValue>"
+```
+
+- **成功响应**：`data` 为 [`DeleteResult`](#deleteresult)。
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": { "docId": 7, "fileName": "员工手册.pdf" }
+}
+```
+
+- **失败响应**：
+
+| `message` | 触发条件 |
+| --- | --- |
+| `"知识库不存在: kbId=x"` | kbId 不存在 / 已软删除 / 不属于当前用户 |
+| `"文档不存在: docId=x"` | docId 不存在 / 不属于该 kbId / 已删除（含重复删除） |
+| `"文档正在索引中, 请稍后再试"` | 文档 `status` 为 `PENDING` / `PROCESSING` |
+
+> **已知限制**：若服务在索引中途宕机，文档会永久卡在 `PROCESSING`（无后台轮询自愈），此时无法删除；需管理员修库后重试：`UPDATE document SET status='FAILED' WHERE status='PROCESSING'`。
+
 ---
 
 ## 5. 联调测试接口（需登录）
@@ -884,6 +925,137 @@ GET /api/rag/kb/1/document
 ```json
 ["alice", "bob", "ckj"]
 ```
+
+---
+
+## 6. A2A 协议接口（不经网关）
+
+模块：`A2aController`（rag-service）。实现 **Agent2Agent（A2A）协议 v1.0 的 HTTP+JSON/REST 绑定**——rag-service 同时是一个标准 A2A Server（"知识库专家 agent"），任何 A2A 客户端（包括其他系统的 agent）都能按协议发现并协作。这是学习导向的**手写最小实现**：Card 发现 + 同步发消息 + 任务查询；流式（`message/stream`）、任务取消、push notification 等留待后续。
+
+与业务接口（第 1~5 节）的关键差异：
+
+- **不经网关**：gateway 没有路由这些路径，经 8080 访问返回 404；直连 rag-service `:8082` 使用（容器内用服务名）
+- **认证不走 Sa-Token**：操作端点（6.2 / 6.3）校验请求头 `X-Api-Key`（两侧同环境变量 `A2A_API_KEY`，Agent Card 的 securitySchemes 有声明）；6.1 Card 端点公开。服务端未配置 key 时返回 503（拒绝裸奔）
+- **媒体类型** `application/a2a+json`；请求头带 `A2A-Version: 1.0`；字段 camelCase；错误体用协议格式（google.rpc.Status + ErrorInfo），**不是** `Result` 信封
+
+### 6.1 获取 Agent Card
+
+- **请求**：`GET /.well-known/agent-card.json`（协议固定的发现位置，公开无需认证）
+- **成功响应**：AgentCard（带 `Cache-Control: max-age=3600`）。节选结构（描述文字略）：
+
+```json
+{
+  "name": "knowledge-base-agent",
+  "description": "知识库专家 agent: 基于已入库文档做检索增强问答……",
+  "supportedInterfaces": [
+    { "url": "http://localhost:8082", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0" }
+  ],
+  "version": "0.1.0",
+  "capabilities": { "streaming": false, "pushNotifications": false },
+  "securitySchemes": {
+    "apiKey": { "apiKeySecurityScheme": { "in": "HEADER", "name": "X-Api-Key" } }
+  },
+  "security": [{ "apiKey": [] }],
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "kb-qa",
+      "name": "知识库问答",
+      "description": "对指定知识库回答事实性问题……",
+      "tags": ["rag", "knowledge-base", "qa", "retrieval"],
+      "inputModes": ["text/plain"],
+      "outputModes": ["text/plain"]
+    }
+  ]
+}
+```
+
+### 6.2 发消息（message:send）
+
+发送一条消息，**同步阻塞至终态**（远端含一次 RAG 检索 + LLM 问答，耗时数秒到数十秒），返回 `TASK_STATE_COMPLETED` 或 `TASK_STATE_FAILED` 的 Task。
+
+- **请求**：`POST /message:send`
+- **请求头**：`X-Api-Key: <A2A_API_KEY>`、`A2A-Version: 1.0`、`Content-Type: application/a2a+json`
+- **请求体**：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `message.role` | string | 是 | 固定 `"ROLE_USER"` |
+| `message.parts[]` | array | 是 | 文本分块 `{"text": "..."}`；多段按换行拼接为完整问题 |
+| `message.messageId` | string | 否 | 客户端生成的消息 id（幂等去重用，可不传） |
+| `message.metadata.kbId` | number/string | 否 | 目标知识库 id（chat 侧桥接时传会话绑定库）；缺省 = 全局检索 |
+
+```bash
+curl -X POST http://localhost:8082/message:send \
+  -H 'Content-Type: application/a2a+json' -H 'A2A-Version: 1.0' \
+  -H 'X-Api-Key: <A2A_API_KEY>' \
+  -d '{"message":{"role":"ROLE_USER","parts":[{"text":"年假有几天"}],"messageId":"m-001","metadata":{"kbId":1}}}'
+```
+
+- **成功响应**（终态 Task；`artifacts` 是任务产出物，含回答与来源片段）：
+
+```json
+{
+  "task": {
+    "id": "6d0c5a4e-...",
+    "contextId": "c19f2b7a-...",
+    "status": { "state": "TASK_STATE_COMPLETED", "timestamp": "2026-08-29T04:12:33.142Z" },
+    "artifacts": [
+      {
+        "artifactId": "9f3b1f22-...",
+        "name": "kb-answer",
+        "parts": [{ "text": "员工每年享有 5 天带薪年假。\n\n[来源片段]\n[1] 每年 5 天带薪年假……" }]
+      }
+    ]
+  }
+}
+```
+
+- **问答失败**（检索/模型异常）：HTTP 仍 200，但 Task 为失败态（任务失败是协议内状态，与 HTTP 5xx 不同层），原因在 `status.message`：
+
+```json
+{
+  "task": {
+    "id": "…", "contextId": "…",
+    "status": {
+      "state": "TASK_STATE_FAILED",
+      "message": { "role": "ROLE_AGENT", "parts": [{ "text": "知识库问答失败: 模型调用失败: …" }] },
+      "timestamp": "2026-08-29T04:12:35.001Z"
+    }
+  }
+}
+```
+
+- **失败响应**（认证）：HTTP `401`（缺失/错误 `X-Api-Key`）；HTTP `503`（服务端未配置 `A2A_API_KEY`）。
+
+### 6.3 查询任务
+
+任务保存在 **内存任务仓**（容量 1000 的 LRU，**服务重启即空**，过期任务也会被淘汰）——查不到是正常现象。
+
+- **请求**：`GET /tasks/{id}`，请求头同 6.2
+- **成功响应**：该 Task 当前完整状态（同 6.2 响应里的 `task` 对象）
+- **任务不存在响应**（HTTP 404，协议错误体格式）：
+
+```json
+{
+  "error": {
+    "code": 404,
+    "status": "NOT_FOUND",
+    "message": "The specified task ID does not exist or is no longer available",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "TASK_NOT_FOUND",
+        "domain": "a2a-protocol.org",
+        "metadata": { "taskId": "xxx" }
+      }
+    ]
+  }
+}
+```
+
+> **与对话接口的关系**：chat-service 的 `rag.a2a.client-enabled: true`（默认 false）且 `rag.mode: agent` 时，绑库会话的 ReAct 检索工具改走本协议（工具名 `searchKnowledgeBaseAgent`，替代调 `/internal/retrieval` 私有接口的 `RagTools`）——**对前端的对话接口（3.4/3.5）无任何变化**，只是检索链路换了协议。
 
 ---
 
@@ -1002,6 +1174,15 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 | `uploadedAt` | datetime | 上传时间 |
 | `indexedAt` | datetime? | 最近一次索引完成时间，未完成过为 `null` |
 
+### DeleteResult
+
+文档删除结果 DTO，`DocumentService.DeleteResult`（record）。出现在 [4.7 删除文档](#47-删除知识库内的文件)。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `docId` | long | 被删文档 id |
+| `fileName` | string | 被删文档的原始文件名（前端删除确认回显用） |
+
 ### 分页响应结构
 
 [4.3 知识库列表](#43-列出当前用户的知识库) 返回 Spring Data 的 `Page<KbOverviewResult>`，`data` 字段主要结构如下：
@@ -1031,7 +1212,7 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 | `"会话不存在"` / `"无权访问该会话"` / `"人格不存在或已删除"` / `"知识库不存在: kbId=x"` | `IllegalArgumentException` | 资源归属/存在性校验失败 |
 
 > 注：业务校验类 `IllegalArgumentException` 由 `GlobalExceptionHandler` 统一转 `Result.fail(message)`；系统级异常（`NotLoginException`、`OptimisticLockingFailureException`、`IllegalStateException`）同样由全局处理器兜底。
-> 例外：[3.5 发送消息（流式）](#35-发送消息流式) 不返回 `Result` 信封，错误统一以 SSE `error` 帧交付（`{"message":"..."}`），`message` 取值与上表同名场景一致。
+> 例外：[3.5 发送消息（流式）](#35-发送消息流式) 不返回 `Result` 信封，错误统一以 SSE `error` 帧交付（`{"message":"..."}`），`message` 取值与上表同名场景一致；第 6 节 A2A 接口的错误走协议格式（401/404/503 + google.rpc.Status 错误体，见各小节示例），同样不经 `GlobalExceptionHandler`。
 
 ---
 
@@ -1060,9 +1241,10 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
    GET  /api/rag/kb/{kbId}/document → 轮询文档 status, 变 DONE 后才可检索到内容(FAILED 看 errorMsg)
 4. POST /api/rag/search             → 索引完成后验证召回质量(可选)
 5. POST /api/rag/ask                → 拿到基于文档的 answer + sources
+6. DELETE /api/rag/kb/{kbId}/document/{docId} → (可选)删除文档, 分块立即清空, 检索不再命中
 ```
 
-**请求头**：第 2~5 步均需 `satoken: <tokenValue>`。启动时 `DataInitializer` 灌入的存量文档（`kbId=1`）无需第 2、3 步即可直接检索/问答。
+**请求头**：第 2~6 步均需 `satoken: <tokenValue>`。启动时 `DataInitializer` 灌入的存量文档（`kbId=1`）无需第 2、3 步即可直接检索/问答。
 
 ### C. 绑定知识库的人格对话流程（RAG + 人格 + 记忆）
 

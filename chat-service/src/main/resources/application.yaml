@@ -59,6 +59,10 @@ rag:
     enabled: true          # 检索路由总开关: false = 绑库会话每条消息都拿原话检索(无路由的兜底行为)
     context-turns: 6       # 路由器可见的最近对话轮数(含助手回复, 用于改写时补全指代)
     model: ""              # 路由用模型; 空 = 用主 chat 模型(deepseek-v4-flash)
+  a2a:
+    base-url: ${A2A_BASE_URL:http://localhost:8082}   # 远程 A2A agent(rag-service)的基址
+    api-key: ${A2A_API_KEY:}                          # 与 rag 侧 a2a.api-key 同值部署, 密钥不落盘
+    client-enabled: false  # true = agent 模式的检索工具改走 A2A 协议(替代 /internal 私有接口)
 
 # ========== ReAct(rag.mode=agent 时的循环控制) ==========
 agent:

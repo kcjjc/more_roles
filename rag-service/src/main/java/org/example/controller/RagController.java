@@ -135,4 +135,15 @@ public class RagController {
             @PathVariable Long kbId) {
         return Result.ok(documentService.listFiles(kbId, StpUtil.getLoginIdAsLong()));
     }
+
+    /**
+     * 删除知识库内的文件: DELETE /api/rag/kb/{kbId}/document/{docId}
+     * <p>分块物理删(检索立即不命中) + 文档软删 + MinIO 对象清理(失败仅告警);
+     * PENDING/PROCESSING 状态拒绝(索引异步进行中, 见 DocumentService.deleteFile).
+     */
+    @DeleteMapping("/kb/{kbId}/document/{docId}")
+    public Result<org.example.service.DocumentService.DeleteResult> deleteDocument(
+            @PathVariable Long kbId, @PathVariable Long docId) {
+        return Result.ok(documentService.deleteFile(kbId, docId, StpUtil.getLoginIdAsLong()));
+    }
 }

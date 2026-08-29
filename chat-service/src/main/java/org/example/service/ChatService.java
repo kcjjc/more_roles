@@ -7,6 +7,7 @@ import org.example.repository.ConversationRepository;
 import org.example.repository.MessageRepository;
 import org.example.common.rag.RetrievalHit;
 import org.example.service.RagRouterService.RouteDecision;
+import org.example.tools.A2aAgentTool;
 import org.example.tools.RagTools;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
@@ -71,10 +72,16 @@ public class ChatService {
     private final ReActExecutor reActExecutor;
     /** 流式对话的 SSE 帧拼装(delta/done/error + 聚合回复/捕获 usage) */
     private final ChatStreamAssembler chatStreamAssembler;
+    /** A2A 客户端: rag.a2a.client-enabled=true 时 ReAct 的检索工具走 A2A 协议而非 /internal */
+    private final A2aClient a2aClient;
 
     /** 绑库会话的检索模式: pre=前置路由检索(默认) | agent=模型自主决策检索(ReAct) */
     @Value("${rag.mode:pre}")
     private String ragMode;
+
+    /** ReAct 检索工具走 A2A 标准协议(替代 /internal 私有接口); 默认关闭维持原链路 */
+    @Value("${rag.a2a.client-enabled:false}")
+    private boolean a2aClientEnabled;
 
     private static final String RAG_MODE_AGENT = "agent";
     /** 后台副作用处理器(摘要 / 标题生成), 异步 */
@@ -95,6 +102,7 @@ public class ChatService {
                        RagRouterService ragRouterService,
                        ReActExecutor reActExecutor,
                        ChatStreamAssembler chatStreamAssembler,
+                       A2aClient a2aClient,
                        ChatPostProcessor postProcessor,
                        ChatClient.Builder chatClientBuilder,
                        ChatMemory chatMemory,
@@ -107,6 +115,7 @@ public class ChatService {
         this.ragRouterService = ragRouterService;
         this.reActExecutor = reActExecutor;
         this.chatStreamAssembler = chatStreamAssembler;
+        this.a2aClient = a2aClient;
         this.postProcessor = postProcessor;
         this.chatClient = chatClientBuilder.defaultAdvisors(loggingAdvisor).build();
         this.chatMemory = chatMemory;
@@ -282,9 +291,13 @@ public class ChatService {
     private ChatResult chatReAct(Conversation conv, String persona, String convKey, String userContent) {
         // agent 模式无前置命中, system 只有 人格 + 摘要 两段
         String system = buildSystem(persona, conv.getSummary(), List.of());
+        // 检索工具二选一: 默认 RagTools(调 rag 私有 /internal 接口, MCP 风格);
+        // a2a 开启时换成 A2aAgentTool(走 A2A v1.0 标准协议, 远端是不透明专家 agent) —— ReAct 循环零改动
+        List<Object> tools = a2aClientEnabled
+                ? List.of(A2aAgentTool.forConversation(a2aClient, conv.getKbId()))
+                : List.of(RagTools.forConversation(ragRetrievalClient, conv.getKbId()));
         ReActExecutor.ReActResult reAct = reActExecutor.execute(
-                system, chatMemory.get(convKey), userContent,
-                List.of(RagTools.forConversation(ragRetrievalClient, conv.getKbId())));
+                system, chatMemory.get(convKey), userContent, tools);
         log.info("[react] conversationId={} steps={} tools=[{}] tokens={} truncated={}",
                 convKey, reAct.steps().size(),
                 reAct.steps().stream().map(ReActStep::toolName).distinct().toList(),

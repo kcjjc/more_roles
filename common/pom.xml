@@ -28,5 +28,10 @@
             <groupId>cn.dev33</groupId>
             <artifactId>sa-token-core</artifactId>
         </dependency>
+        <!-- A2A 契约 DTO 的 @JsonInclude(NON_NULL)(版本由 Boot BOM 管理) -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-annotations</artifactId>
+        </dependency>
     </dependencies>
 </project>

@@ -4,9 +4,11 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.entity.Document;
 import org.example.entity.KnowledgeBase;
+import org.example.repository.DocChunkRepository;
 import org.example.repository.DocumentRepository;
 import org.example.repository.KnowledgeBaseRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -39,9 +41,11 @@ public class DocumentService {
 
     private final KnowledgeBaseRepository knowledgeBaseRepository;
     private final DocumentRepository documentRepository;
+    private final DocChunkRepository docChunkRepository;
     private final DocumentLoaderService documentLoaderService;
     private final MinioStorageService minioStorageService;
     private final IndexService indexService;
+    private final TransactionTemplate transactionTemplate;
 
     /**
      * 往知识库添加一个文件: 校验归属与文件 → 上传 MinIO → 建档(PENDING) → 提交异步索引.
@@ -107,8 +111,62 @@ public class DocumentService {
                 .toList();
     }
 
+    /**
+     * 删除知识库内的一个文档: 校验归属与状态 → 短事务(物理删分块 + 软删文档) → 提交后清理 MinIO 对象.
+     * <p>
+     * 三个刻意的删除语义:
+     * <ol>
+     *   <li><b>分块物理删、文档软删</b>: 检索的原生 SQL 只查 doc_chunk 按 kb_id 过滤、不 join document,
+     *       分块不删则检索仍命中 —— 这是"删除后立即检索不到"的唯一保障; 文档记录软删保留可追溯
+     *       (查询侧全部按 DeletedFalse 过滤, 列表/轮询自动消失)。</li>
+     *   <li><b>PENDING / PROCESSING 拒绝</b>: 索引任务还在异步跑, 此时删除分块会被任务写回。
+     *       这层只是 UX 拦截(省一次白跑的 embedding 调用), 竞态的兜底在 LoadService 的"已删除即放弃"守卫。</li>
+     *   <li><b>MinIO 删除失败仅告警不回滚</b>: 反过来先删对象再落库, 失败会出现"源文件没了但检索仍命中"
+     *       的中间态; 而库已删、对象残留只是浪费存储空间。removeObject 幂等, 假 minioPath 也不会报错。</li>
+     * </ol>
+     */
+    public DeleteResult deleteFile(Long kbId, Long docId, Long userId) {
+        // 1. 知识库必须存在、未删除、且属于当前用户(与 addFile 同款校验)
+        knowledgeBaseRepository.findByIdAndCreatedByAndDeletedFalse(kbId, userId)
+                .orElseThrow(() -> new IllegalArgumentException("知识库不存在: kbId=" + kbId));
+
+        // 2. 文档必须存在、未删除、且属于该库(按 kbId 过滤 → 删别的库的 docId 也走"不存在")
+        Document document = documentRepository.findByIdAndKbIdAndDeletedFalse(docId, kbId)
+                .orElseThrow(() -> new IllegalArgumentException("文档不存在: docId=" + docId));
+
+        // 3. 索引中的文档拒绝删除(重复删除则被上一步的 DeletedFalse 挡住, 报"不存在")
+        if (Document.STATUS_PENDING.equals(document.getStatus())
+                || Document.STATUS_PROCESSING.equals(document.getStatus())) {
+            throw new IllegalArgumentException("文档正在索引中, 请稍后再试");
+        }
+
+        // 4. 短事务: 物理删分块 + 软删文档(编程式事务, executeWithoutResult 返回即已提交;
+        //    不用 @Transactional 注解 —— 否则第 5 步的 MinIO 网络调用会被圈进事务占用 DB 连接)
+        transactionTemplate.executeWithoutResult(tx -> {
+            docChunkRepository.deleteByDocId(docId);
+            document.setDeleted(true);
+            documentRepository.save(document);
+        });
+
+        // 5. 事务提交后清理 MinIO 对象, 失败只告警(见方法注释第 3 点)
+        try {
+            minioStorageService.delete(document.getMinioPath());
+        } catch (Exception e) {
+            log.warn("[文档删除] MinIO 对象清理失败, 仅残留存储空间, 不影响删除结果, docId={}, objectPath={}",
+                    docId, document.getMinioPath(), e);
+        }
+
+        log.info("[文档删除] kbId={}, docId={}, fileName={}, 分块已清理, 文档已软删",
+                kbId, docId, document.getFileName());
+        return new DeleteResult(docId, document.getFileName());
+    }
+
     /** 上传结果: 文档 id + 初始状态(索引异步进行, 完成后变为 DONE) */
     public record UploadResult(Long docId, String fileName, String fileType, String status) {
+    }
+
+    /** 删除结果: 被删文档 id + 文件名(前端删除确认回显用) */
+    public record DeleteResult(Long docId, String fileName) {
     }
 
     /** 知识库内文档的概览: 元信息 + 索引状态(列表/轮询用) */

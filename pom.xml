@@ -33,6 +33,9 @@
         <spring-ai.version>1.1.2</spring-ai.version>
         <spring-cloud.version>2025.0.0</spring-cloud.version>
         <sa-token.version>1.44.0</sa-token.version>
+        <!-- 显式开启注解处理: maven-compiler-plugin 3.13+ 不再默认隐式运行 classpath 上的
+             处理器(如 Lombok), rag-service 曾因此在命令行构建时找不到 @Builder/@Slf4j 生成的符号 -->
+        <maven.compiler.proc>full</maven.compiler.proc>
     </properties>
 
     <!-- 统一版本管理：子模块引依赖一律不写版本号 -->

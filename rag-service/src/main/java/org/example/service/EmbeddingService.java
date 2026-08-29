@@ -31,17 +31,25 @@ public class EmbeddingService {
     @Value("${rag.cache.embedding-ttl:7d}")
     private Duration embeddingTtl;
 
-    private static final int BATCH_SIZE = 20;
+    /**
+     * 单批条数: DashScope text-embedding-v3 单次批量上限 10(公共/专属实例同), 传 20 会被
+     * 400 "batch size should not be larger than 10" 拒绝(存量文档不足 10 块时侥幸不触发)。
+     */
+    @Value("${rag.embedding.batch-size:10}")
+    private int batchSize;
 
     /**
      * embedding API 调用的重试模板: 3 次尝试, 指数退避 1s / 2s。
      * 用编程式 RetryTemplate 而不是 @Retryable —— embedBatch 里调 embedFromApi 属于同类自调用,
      * 注解式必须经 AOP 代理才生效, 自调用会静默绕过(且工程从未开启 @EnableRetry), 重试从未生效过。
+     * NonTransientAiException(400 参数错类)是确定性失败, 重试必然再败 —— 排除, 不空耗退避时间。
+     * 注意: builder 的 retryOn / notRetryOn 互斥(同用直接抛 IllegalArgumentException), 未分类的
+     * 异常默认就重试, 单用 notRetryOn 即"除 NonTransientAiException 外都重试"。
      */
     private final RetryTemplate retryTemplate = RetryTemplate.builder()
             .maxAttempts(3)
             .exponentialBackoff(1000, 2, 10_000)
-            .retryOn(Exception.class)
+            .notRetryOn(org.springframework.ai.retry.NonTransientAiException.class)
             .build();
 
     /**
@@ -111,8 +119,8 @@ public class EmbeddingService {
         AtomicInteger totalTokens = new AtomicInteger(0);
 
         // 分批提交
-        for (int start = 0; start < texts.size(); start += BATCH_SIZE) {
-            int end = Math.min(start + BATCH_SIZE, texts.size());
+        for (int start = 0; start < texts.size(); start += batchSize) {
+            int end = Math.min(start + batchSize, texts.size());
             List<String> batch = texts.subList(start, end);
 
             long batchStart = System.currentTimeMillis();
@@ -132,8 +140,8 @@ public class EmbeddingService {
                     .forEach(r -> result.add(r.getOutput()));
 
             log.debug("[Embedding] 批次{}/{}，size={}，耗时={}ms",
-                    start / BATCH_SIZE + 1,
-                    (texts.size() + BATCH_SIZE - 1) / BATCH_SIZE,
+                    start / batchSize + 1,
+                    (texts.size() + batchSize - 1) / batchSize,
                     batch.size(), elapsed);
         }
 

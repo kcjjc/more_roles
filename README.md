@@ -8,6 +8,7 @@
 
 - **用户认证**：Sa-Token 登录态三服务共享（会话存 Redis），网关统一校验、业务服务兜底拦截
 - **流式输出**：`POST .../messages/stream` 以 SSE 增量推送模型回复（打字机效果）；流结束后才落库，中断/断开则整轮丢弃；同步接口保留
+- **A2A 协议（Agent2Agent v1.0，手写实现）**：rag-service 作为标准 A2A Server 暴露 Agent Card 与 `message:send`（知识库专家 agent，X-Api-Key 认证）；chat 的 agent 模式可切换为经 A2A 协议协作（`rag.a2a.client-enabled`），与 /internal 私有接口并行
 - **人格管理**：多套 systemPrompt 独立管理，超长人格按 4000 字/片分片存储，对上层透明
 - **长会话记忆**：窗口记忆（20 条）+ 窗口外老消息异步压缩为摘要，摘要并入 system 发给模型，短事务落库 + 乐观锁保证并发安全
 - **知识库（RAG）**：上传 PDF / DOCX / MD / TXT 到 MinIO，异步管线解析 → 结构感知分块 → 向量化入 pgvector，支持相似度 + 阈值过滤检索
@@ -31,6 +32,9 @@
                                    │                  │
                                    └───► /internal/retrieval + /internal/kb/{id}/owned
                                         (检索失败→降级跳过RAG; 归属校验失败→明确报错)
+                                   └───► A2A v1.0(HTTP+JSON): /.well-known/agent-card.json
+                                        + /message:send + /tasks/{id}   (rag 是标准 A2A Server,
+                                        X-Api-Key 认证; chat 的 rag.a2a.client-enabled 开关)
 
   共享基础设施:  PostgreSQL(单实例双 schema: chat_svc / rag_svc[+pgvector])
                 Redis(Sa-Token 共享会话 + embedding 缓存)    MinIO(文档存储)
@@ -65,7 +69,7 @@
 
 - **服务拆分边界**：RAG 的解析 / 向量化是 CPU 密集型异步任务，与对话服务资源特征不同，独立部署互不影响；`RagRouterService`（要不要检索、检索句改写）属于对话语义留在 chat，向量化 + 相似度检索归 rag
 - **对话主路径**：绑库会话至多两次 LLM 调用（路由一次 + 主回复一次），模型调用在事务外，落库走短事务 + 乐观锁（3 次重试），摘要 / 标题等副作用异步投递、按游标幂等
-- **RAG 入库管线**：异步 ETL（`@Async` 专用线程池），有章节结构走结构感知分块、否则滑窗（512 字 / 64 重叠），embedding 先查 Redis 缓存（MD5 key）未命中再批量调 API（20 条/批，指数退避重试），失败任务自动重试
+- **RAG 入库管线**：异步 ETL（`@Async` 专用线程池），有章节结构走结构感知分块、否则滑窗（512 字 / 64 重叠），embedding 先查 Redis 缓存（MD5 key）未命中再批量调 API（10 条/批，DashScope v3 单批上限，指数退避重试），失败任务自动重试
 - **检索增强的不变量**：检索命中只拼进当轮 prompt 的【参考资料】段，绝不作为 message 落库（避免挤占记忆窗口、污染异步摘要）
 - **降级语义**：绑库对话中 rag 不可用 → 跳过 RAG 继续回答（聊天不中断）；新建绑库会话时 rag 不可用 → 明确报错（显式绑定不能静默失败）
 - **数据所有权**：每个服务只访问自己的 schema，跨服务只有 HTTP 契约（common 模块 DTO），不跨库 join
@@ -101,6 +105,8 @@
 | `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` | MinIO 地址与账号（默认 `http://localhost:9000` / `admin`） | rag |
 | `RAG_BASE_URL` | rag 地址（默认 `http://localhost:8082`） | chat / gateway |
 | `CHAT_BASE_URL` | chat 地址（默认 `http://localhost:8081`） | gateway |
+| `A2A_API_KEY` | A2A 操作端点（`/message:send`、`/tasks/**`）的 X-Api-Key，两侧同值部署 | chat / rag |
+| `A2A_BASE_URL` | A2A 基址（默认 `http://localhost:8082`，容器内用服务名，写进 Agent Card） | chat / rag |
 
 ## 快速开始
 

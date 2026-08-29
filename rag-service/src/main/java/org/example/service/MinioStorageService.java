@@ -6,6 +6,7 @@ import io.minio.GetObjectResponse;
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
+import io.minio.RemoveObjectArgs;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -78,7 +79,19 @@ public class MinioStorageService {
         }
     }
 
+    /**
+     * 删除对象。S3 语义下 removeObject 是幂等的: 对象不存在不报错(直接 204),
+     * 因此 DataInitializer 灌的假 minioPath 走到这里也不会失败。
+     */
     public void delete(String objectPath) {
-        throw new UnsupportedOperationException("MinIO 完整实现见后面");
+        try {
+            minioClient.removeObject(RemoveObjectArgs.builder()
+                    .bucket(bucket)
+                    .object(objectPath)
+                    .build());
+            log.debug("MinIO 删除完成, objectPath={}", objectPath);
+        } catch (Exception e) {
+            throw new RuntimeException("MinIO 删除文件失败, objectPath=" + objectPath, e);
+        }
     }
 }

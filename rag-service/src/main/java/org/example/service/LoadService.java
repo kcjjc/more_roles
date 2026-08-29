@@ -17,6 +17,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
+ * 索引执行服务: 解析 → 分块 → 向量化 → 落库, 供 IndexTaskLauncher 异步调用.
+ * <p>
+ * <b>已删除守卫</b>: 删除文档(PENDING/PROCESSING 之外的状态)允许与索引任务并发 ——
+ * FAILED 文档的重试退避窗口里任务随时会 fire, 删除侧的状态拦截挡不住。因此本服务的
+ * 全部写入路径(entry 入口 / 写分块前 / 状态回写)都以"文档不存在或已软删即放弃"为前提,
+ * 保证已删除的文档不会被分块写回、不会被过期实体 merge 复活。
+ *
  * @author ckj
  */
 @Service
@@ -48,8 +55,12 @@ public class LoadService {
 
     }
     public void executeWithText(Long taskId, Long docId, String textContent) {
-        // 先找出文档
-        Document document = documentRepository.findById(docId).orElseThrow();
+        // 先找出文档(不存在或已软删 → 取消任务, 见类注释"已删除守卫")
+        Document document = documentRepository.findById(docId).orElse(null);
+        if (isGone(document)) {
+            cancelTask(taskId, "文档不存在或已删除, 任务取消");
+            return;
+        }
         // 构造解析结果 就那么点先自己来
         ParseResult parseResult = ParseResult.builder()
                 .success(true)
@@ -82,6 +93,14 @@ public class LoadService {
             // 第二步：批量 Embedding
             List<String> texts = chunks.stream().map(ChunkResult::getContent).toList();
             List<float[]> embeddings = embeddingService.embedBatch(texts);
+
+            // 第 2.5 步：写分块前重查一次文档存活状态。embedding 耗时数秒, 期间文档可能已被
+            // DELETE 接口删除 —— 此时必须放弃: 继续写会把分块写回(检索命中已删文档), 且末尾
+            // save(document) 拿的是开头读的过期实体, merge 会把软删标记冲掉(文档在列表复活)。
+            if (isGone(documentRepository.findById(docId).orElse(null))) {
+                cancelTask(taskId, "文档已删除, 任务取消");
+                return;
+            }
 
             // 第三步：删除旧版本分块（放在 Embedding 成功之后，保证有新数据才删旧数据）
             docChunkRepository.deleteByDocIdAndDocVersionNot(docId, document.getVersion());
@@ -151,7 +170,11 @@ public class LoadService {
 
     /** 从 MinIO 下载文件并走解析器索引(REST 上传的文档走这条; 也供失败重试复用). */
     public void executeFromMinio(Long taskId, Long docId) {
-        Document doc = documentRepository.findById(docId).orElseThrow();
+        Document doc = documentRepository.findById(docId).orElse(null);
+        if (isGone(doc)) {
+            cancelTask(taskId, "文档不存在或已删除, 任务取消");
+            return;
+        }
         try {
             byte[] fileBytes = minioStorageService.download(doc.getMinioPath());
             ParseResult parseResult = loaderService.load(
@@ -169,7 +192,11 @@ public class LoadService {
         task.setFinishedAt(LocalDateTime.now());
         indexTaskRepository.save(task);
 
+        // 已删除的文档不回写状态/错误信息(软删行保持原样, 不复活)
         documentRepository.findById(docId).ifPresent(doc -> {
+            if (Boolean.TRUE.equals(doc.isDeleted())) {
+                return;
+            }
             doc.setStatus(Document.STATUS_FAILED);
             doc.setErrorMsg(message);
             documentRepository.save(doc);
@@ -187,7 +214,11 @@ public class LoadService {
     }
 
     private void updateDocumentStatus(Long docId, String status) {
+        // 已删除的文档不回写状态(否则把软删行改成 PROCESSING/DONE 会造成"删除后复活"的表象)
         documentRepository.findById(docId).ifPresent(doc -> {
+            if (Boolean.TRUE.equals(doc.isDeleted())) {
+                return;
+            }
             doc.setStatus(status);
             documentRepository.save(doc);
         });
@@ -201,5 +232,21 @@ public class LoadService {
             if (IndexTask.STATUS_DONE.equals(status)) task.setFinishedAt(LocalDateTime.now());
             indexTaskRepository.save(task);
         });
+    }
+
+    /** 文档不存在(null)或已软删 → 索引管线应放弃对该文档的一切写入. */
+    private static boolean isGone(Document doc) {
+        return doc == null || Boolean.TRUE.equals(doc.isDeleted());
+    }
+
+    /** 取消任务: 置 FAILED + 原因 + 完成时间. 只写任务半段, 不回写文档(文档要么已删要么不存在). */
+    private void cancelTask(Long taskId, String message) {
+        indexTaskRepository.findById(taskId).ifPresent(task -> {
+            task.setStatus(IndexTask.STATUS_FAILED);
+            task.setErrorMsg(message);
+            task.setFinishedAt(LocalDateTime.now());
+            indexTaskRepository.save(task);
+        });
+        log.info("[IndexService] 任务取消：taskId={}，原因={}", taskId, message);
     }
 }

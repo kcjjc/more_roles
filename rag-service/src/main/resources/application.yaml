@@ -73,3 +73,10 @@ rag:
   search:
     top-k: 5               # 检索召回条数(调用方未显式传 topK 时的默认值)
     min-score: 0.35        # 相似度阈值: 低于该分的命中不返回(防上下文污染)
+  embedding:
+    batch-size: 10         # 向量化单批条数上限: DashScope text-embedding-v3 单次最多 10 条, 超限直接 400
+
+# ========== A2A(Agent2Agent 协议 v1.0, HTTP+JSON 绑定; 本服务作为 A2A Server) ==========
+a2a:
+  base-url: ${A2A_BASE_URL:http://localhost:8082}   # 对外暴露的基址(写进 Agent Card, 容器内用服务名)
+  api-key: ${A2A_API_KEY:}                          # 操作端点(/message:send、/tasks/**)的 X-Api-Key, 密钥不落盘
