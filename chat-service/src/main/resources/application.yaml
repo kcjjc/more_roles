@@ -4,6 +4,9 @@ server:
 spring:
   application:
     name: chat-service
+  mvc:
+    async:
+      request-timeout: -1        # SSE 流式接口(/messages/stream)用 MVC 异步请求; Tomcat 默认 30s 会掐断长流, -1 = 不超时
   ai:
     openai:
       base-url: https://api.deepseek.com           # chat 走 DeepSeek
@@ -49,9 +52,14 @@ sa-token:
 
 # ========== RAG(跨服务调用 rag-service) ==========
 rag:
+  mode: pre                   # 绑库会话的检索模式: pre=前置路由检索(路由器判定+改写) | agent=模型自主决策检索(ReAct 循环, 跳过路由器)
   service:
     base-url: ${RAG_BASE_URL:http://localhost:8082}   # rag-service 地址(容器内用服务名)
   route:
     enabled: true          # 检索路由总开关: false = 绑库会话每条消息都拿原话检索(无路由的兜底行为)
     context-turns: 6       # 路由器可见的最近对话轮数(含助手回复, 用于改写时补全指代)
     model: ""              # 路由用模型; 空 = 用主 chat 模型(deepseek-v4-flash)
+
+# ========== ReAct(rag.mode=agent 时的循环控制) ==========
+agent:
+  max-iterations: 5           # 模型↔工具循环轮数上限, 达到后去掉工具强制收尾(不阻断聊天)

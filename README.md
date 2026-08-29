@@ -7,6 +7,7 @@
 ## 功能特性
 
 - **用户认证**：Sa-Token 登录态三服务共享（会话存 Redis），网关统一校验、业务服务兜底拦截
+- **流式输出**：`POST .../messages/stream` 以 SSE 增量推送模型回复（打字机效果）；流结束后才落库，中断/断开则整轮丢弃；同步接口保留
 - **人格管理**：多套 systemPrompt 独立管理，超长人格按 4000 字/片分片存储，对上层透明
 - **长会话记忆**：窗口记忆（20 条）+ 窗口外老消息异步压缩为摘要，摘要并入 system 发给模型，短事务落库 + 乐观锁保证并发安全
 - **知识库（RAG）**：上传 PDF / DOCX / MD / TXT 到 MinIO，异步管线解析 → 结构感知分块 → 向量化入 pgvector，支持相似度 + 阈值过滤检索
@@ -80,6 +81,7 @@
 | 会话 | `GET /api/chat/personas/{personaId}/conversations`、`POST /api/chat/conversations` | 会话列表（可带 `kbId` 绑定知识库）、新建会话 |
 | 会话 | `GET /api/chat/conversations/{id}`、`DELETE /api/chat/conversations/{id}` | 会话详情（含消息）、删除会话 |
 | 对话 | `POST /api/chat/conversations/{id}/messages` | 发送消息并获取回复 |
+| 对话 | `POST /api/chat/conversations/{id}/messages/stream` | 发送消息并获取 SSE 流式回复（`delta` 增量帧 + `done` 收尾帧 + `error` 错误帧；agent 模式最终回复一次性推出） |
 | 知识库 | `POST /api/rag/kb`、`GET /api/rag/list` | 新建知识库、知识库列表 |
 | 文档 | `POST /api/rag/kb/{kbId}/document`、`GET /api/rag/kb/{kbId}/document` | 上传文档（≤50MB，异步索引）、文档列表（含索引状态，上传后轮询） |
 | 问答 | `POST /api/rag/search`、`POST /api/rag/ask` | 相似度检索、对知识库直接提问 |

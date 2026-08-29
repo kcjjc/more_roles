@@ -59,6 +59,7 @@ http://localhost:8080
 - 成功：`Result.ok(data)` → `code=200, message="success"`
 - 失败：`Result.fail(message)` → `code=500, message=<错误提示>, data=null`
 - 即便抛出异常，也由 `GlobalExceptionHandler` 收口为同一信封，**不会返回裸 500 + 堆栈**。
+- ⚠️ 唯一例外：[3.5 发送消息（流式）](#35-发送消息流式) 返回的是 **SSE 帧流**（`text/event-stream`），不走 `Result` 信封——错误以 `error` 帧交付（该请求的 Accept 无法与 JSON 协商 content-type）。
 
 ### 认证机制（Sa-Token）
 
@@ -96,7 +97,8 @@ http://localhost:8080
 | 3.2 | POST | `/api/chat/conversations` | 是 | 新建会话（可选绑定知识库做 RAG 对话） |
 | 3.3 | GET | `/api/chat/conversations/{id}` | 是 | 会话详情（含历史消息） |
 | 3.4 | POST | `/api/chat/conversations/{id}/messages` | 是 | 发送消息并获取模型回复 |
-| 3.5 | DELETE | `/api/chat/conversations/{id}` | 是 | 删除会话（连带消息） |
+| 3.5 | POST | `/api/chat/conversations/{id}/messages/stream` | 是 | 发送消息并获取 **SSE 流式**回复（打字机效果） |
+| 3.6 | DELETE | `/api/chat/conversations/{id}` | 是 | 删除会话（连带消息） |
 | 4.1 | POST | `/api/rag/search` | 是 | 纯向量检索（验证召回质量；kbId 需归属当前用户） |
 | 4.2 | POST | `/api/rag/ask` | 是 | 检索增强问答（检索 + 调模型；kbId 需归属当前用户） |
 | 4.3 | GET | `/api/rag/list` | 是 | 列出当前用户的知识库（分页，可按 kbId 筛选） |
@@ -506,7 +508,62 @@ GET /api/persona?personaId=a1b2c3d4e5f647008811122233344455
 >
 > 因此在发消息后**立即**调用 [3.3 会话详情](#33-会话详情含历史消息)，`title`/`summary` 可能仍为 `null`，稍后再查即可看到。
 
-### 3.5 删除会话
+### 3.5 发送消息（流式）
+
+[3.4 发送消息](#34-发送消息) 的流式版本：编排完全一致（人格/记忆/绑库检索路由），差异只在**交付方式**——模型回复以 SSE（Server-Sent Events，`text/event-stream`）逐段增量推送，前端可做打字机效果。原同步接口保留，两者可按场景混用。
+
+- **请求**：`POST /api/chat/conversations/{id}/messages/stream`
+- **请求头**：`satoken: <tokenValue>`
+- **Content-Type**：`application/json`
+- **Accept**：`text/event-stream`
+- **路径参数 / 请求体**：与 [3.4 发送消息](#34-发送消息) 完全一致（`id` 路径参数 + `{"content": "..."}`）。
+
+```bash
+curl -N -X POST http://localhost:8080/api/chat/conversations/8/messages/stream \
+  -H "satoken: <tokenValue>" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"讲一个长一点的故事"}'
+```
+
+- **成功响应**：SSE 帧序列（HTTP 200，`Content-Type: text/event-stream`）。三种事件：
+
+| 事件 | data | 说明 |
+| --- | --- | --- |
+| `delta` | 纯文本增量（多帧，按序拼接即完整回复；含换行时服务端自动按行拆多个 `data:` 行） | 模型逐段输出 |
+| `done` | `{"conversationId":8,"tokens":187}` | 流正常结束；**收到此帧 = 本轮已落库**。`tokens` 为本次主调用消耗（绑库 pre 会话另有路由消耗，计入 `conversation.totalTokens`） |
+| `error` | `{"message":"..."}` | 单帧终结：流前校验失败 / 模型流中断 / 聚合为空 / 落库失败 |
+
+wire 格式示例（实际传输内容）：
+
+```
+event:delta
+data:从前有一座灯塔，
+
+event:delta
+data:塔里住着一位守夜人……
+
+event:done
+data:{"conversationId":8,"tokens":187}
+
+```
+
+- **语义要点**：
+  - **落库时机**：流正常结束后服务端才落库 user/assistant 消息并异步投递摘要/标题（与 3.4 相同的短事务 + 乐观锁），因此 `done` 帧到达后再查 [3.3 会话详情](#33-会话详情含历史消息) 必然能看到本轮消息；
+  - **中断丢弃**：模型流中断或客户端中途断开时，未完成回复**整轮丢弃不落库**（前端重发即可）；中断前已收到的 `delta` 由前端自行清理；
+  - **agent 模式（伪流式）**：会话绑定知识库且 `rag.mode=agent`（ReAct 检索）时，检索循环同步执行（工具中间过程不出流），最终回复作为**单个** `delta` 帧 + `done` 帧一次性推出——首字节慢于 pre 模式，属预期行为；
+  - **token 统计**：与 3.4 一致，`message.tokens` 只记主调用，路由/ReAct 全循环消耗计入 `conversation.totalTokens`。
+
+- **错误帧场景**：
+
+| `message` | 触发条件 |
+| --- | --- |
+| `"消息内容不能为空"` / `"会话不存在"` / `"无权访问该会话"` / `"人格不存在或已删除"` | 流开始前的校验失败（对应 3.4 的同名 `Result` 失败） |
+| `"模型暂时无响应，请重试"` | 模型流中断，或模型返回为空 |
+| `"保存失败，请重试"` | 流后落库失败（乐观锁重试 3 次仍冲突；此时回复已输出，请重发消息） |
+
+- **前端消费提示**：浏览器原生 `EventSource` 只支持 GET，**不能**直接消费本接口；用 `fetch` 读取 `response.body` 的 `ReadableStream` 自行解析 SSE 帧，或使用 `@microsoft/fetch-event-source` 等支持 POST 的库。
+
+### 3.6 删除会话
 
 连带删除该会话下的全部消息。
 
@@ -974,6 +1031,7 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 | `"会话不存在"` / `"无权访问该会话"` / `"人格不存在或已删除"` / `"知识库不存在: kbId=x"` | `IllegalArgumentException` | 资源归属/存在性校验失败 |
 
 > 注：业务校验类 `IllegalArgumentException` 由 `GlobalExceptionHandler` 统一转 `Result.fail(message)`；系统级异常（`NotLoginException`、`OptimisticLockingFailureException`、`IllegalStateException`）同样由全局处理器兜底。
+> 例外：[3.5 发送消息（流式）](#35-发送消息流式) 不返回 `Result` 信封，错误统一以 SSE `error` 帧交付（`{"message":"..."}`），`message` 取值与上表同名场景一致。
 
 ---
 
@@ -986,6 +1044,7 @@ RAG 问答结果，`RagService.AskResult`（record）。出现在 [4.2 问答](#
 2. POST /api/persona/upload         → 拿到 personaId
    POST /api/chat/conversations     → 拿到 conversationId（可选传 kbId 绑定知识库, 见流程 C）
 3. POST /api/chat/conversations/{id}/messages  → 拿到模型 reply（可循环）
+   （流式变体: 同路径加 /stream, SSE 逐段推送, 见 3.5）
 4. GET  /api/chat/conversations/{id}           → 拉取历史（title/summary 稍后异步填充）
 5. DELETE /api/chat/conversations/{id}         → 清理
 ```

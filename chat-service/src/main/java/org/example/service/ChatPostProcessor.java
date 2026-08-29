@@ -140,13 +140,17 @@ public class ChatPostProcessor {
         String prompt = "请把以下内容整合成一段简洁的中文摘要（保留关键事实、用户偏好、未完成的事项），"
                 + "直接输出摘要文本，不要加多余说明：\n" + text;
         try {
-            var callResult = chatClient.prompt().user(prompt).call();
-            String s = callResult.content();
+            // ⚠️ 只触发一次链执行取 chatResponse(), 内容与 token 从同一响应拿
+            // (对同一 callResult 连调 content()/chatResponse() 各触发一次 advisor 链, 第二次抛
+            //  "No CallAdvisors available" —— 摘要会一直静默失败且游标不推进, 见 CLAUDE.md gotcha)
+            ChatResponse chatResponse = chatClient.prompt().user(prompt).call().chatResponse();
+            String s = (chatResponse != null && chatResponse.getResult() != null)
+                    ? chatResponse.getResult().getOutput().getText() : null;
             if (s == null || s.isBlank()) {
                 return new SummarizeOutcome(null, 0, false);
             }
             String summary = s.trim();
-            int tokens = extractTokens(callResult.chatResponse());
+            int tokens = extractTokens(chatResponse);
             if (summary.length() > SUMMARY_MAX_CHARS) {
                 summary = recompress(summary);  // 防膨胀
             }
@@ -177,9 +181,11 @@ public class ChatPostProcessor {
         String prompt = "请用不超过20个字的一句话总结下面这段对话的主题，直接输出标题文本，"
                 + "不要加引号、序号或多余说明：\n用户：" + userContent + "\n助手：" + reply;
         try {
-            var callResult = chatClient.prompt().user(prompt).call();
-            int tokens = extractTokens(callResult.chatResponse());
-            String title = callResult.content();
+            // 同上: 单次 chatResponse() 同时取内容与 token, 避免二次触发 advisor 链
+            ChatResponse chatResponse = chatClient.prompt().user(prompt).call().chatResponse();
+            int tokens = extractTokens(chatResponse);
+            String title = (chatResponse != null && chatResponse.getResult() != null)
+                    ? chatResponse.getResult().getOutput().getText() : null;
             if (title == null || title.isBlank()) {
                 return new TitleGen("新对话", tokens);
             }

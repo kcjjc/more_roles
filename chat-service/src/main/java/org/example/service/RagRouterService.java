@@ -105,13 +105,19 @@ public class RagRouterService {
         }
         int tokens = 0;
         try {
-            var callResult = chatClient.prompt()
+            // ⚠️ 只能触发一次链执行: 对同一个 callResult 调 chatResponse() 后再调 content()
+            // 会各自独立触发一次 advisor 链(一次性 Deque), 第二次抛 "No CallAdvisors available".
+            // 这里取一次 chatResponse(), 内容与 token 都从同一响应里拿(与 ChatService.invokeModel 同款写法).
+            ChatResponse chatResponse = chatClient.prompt()
                     .system(SYSTEM_PROMPT)
                     .user(buildUserPrompt(personaName, recentTurns, userMessage))
                     .options(buildOptions())
-                    .call();
-            tokens = extractTokens(callResult.chatResponse());
-            return parseRouteOutput(callResult.content(), userMessage).withTokens(tokens);
+                    .call()
+                    .chatResponse();
+            tokens = extractTokens(chatResponse);
+            String output = (chatResponse != null && chatResponse.getResult() != null)
+                    ? chatResponse.getResult().getOutput().getText() : null;
+            return parseRouteOutput(output, userMessage).withTokens(tokens);
         } catch (Exception e) {
             log.warn("[route] 路由调用失败, 退回拿原话检索: {}", e.getMessage());
             return new RouteDecision(true, userMessage, true, tokens);
@@ -156,11 +162,32 @@ public class RagRouterService {
         return builder.build();
     }
 
-    private String truncate(String text) {
+    /**
+     * 截断到 {@value #TURN_MAX_CHARS} 个<b>代码点</b>(包内可见供单测).
+     * <p>
+     * ⚠️ 不能用 substring 按_char_截断: emoji 是代理对(占 2 个 char), 切在中间会留下
+     * 孤立的高代理(码点 U+D800..U+DBFF 之一), Jackson 序列化成不完整的 unicode 转义后
+     * DeepSeek 会以 400 "unexpected end of hex escape" 拒绝整个请求. 这里逐代码点处理:
+     * 合法字符原样保留(emoji 算 1 个), 顺带丢弃文本里既有的孤立代理(历史脏数据).
+     */
+    static String truncate(String text) {
         if (text == null) {
             return "";
         }
-        return text.length() <= TURN_MAX_CHARS ? text : text.substring(0, TURN_MAX_CHARS) + "…";
+        boolean overlong = text.codePointCount(0, text.length()) > TURN_MAX_CHARS;
+        StringBuilder sb = new StringBuilder(text.length() + 1);
+        int count = 0;
+        for (int i = 0; i < text.length() && count < TURN_MAX_CHARS; ) {
+            int cp = text.codePointAt(i);
+            if (cp >= Character.MIN_SURROGATE && cp <= Character.MAX_SURROGATE) {
+                i++;   // 孤立代理: 之前的截断产物或入库脏数据, 丢弃不进请求体
+                continue;
+            }
+            sb.appendCodePoint(cp);
+            i += Character.charCount(cp);
+            count++;
+        }
+        return overlong ? sb.append('…').toString() : sb.toString();
     }
 
     // ---------- 解析(包内可见供单测) ----------

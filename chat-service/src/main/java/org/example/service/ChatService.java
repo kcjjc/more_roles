@@ -7,17 +7,22 @@ import org.example.repository.ConversationRepository;
 import org.example.repository.MessageRepository;
 import org.example.common.rag.RetrievalHit;
 import org.example.service.RagRouterService.RouteDecision;
+import org.example.tools.RagTools;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
+import reactor.core.publisher.Flux;
 
 import java.util.List;
 
@@ -29,13 +34,21 @@ import java.util.List;
  *  * 摘要 —— 窗口外的老消息压缩成一段存 conversation.summary, 并入 system 发给模型;
  *    摘要/标题的【生成】已剥离到 {@link ChatPostProcessor} 异步执行, 不阻塞主响应.
  * <p>
- * RAG(会话绑定 kbId 时生效): 消息先过 {@link RagRouterService} 判定是否检索并改写检索句,
- * 需要时经 {@link RagRetrievalClient} 调 rag-service 检索(跨服务), 命中片段并入 system 的【参考资料】段.
- * 命中内容只进当轮 prompt, 不落 message 表.
+ * RAG(会话绑定 kbId 时生效), 按 rag.mode 分流:
+ *  * pre(默认) —— 前置检索: 消息先过 {@link RagRouterService} 判定是否检索并改写检索句,
+ *    需要时经 {@link RagRetrievalClient} 调 rag-service 检索(跨服务), 命中片段并入 system 的【参考资料】段;
+ *  * agent —— ReAct: 跳过路由器, 由 {@link ReActExecutor} 驱动显式 Reason→Act 循环,
+ *    检索作为工具({@link org.example.tools.RagTools})由模型自主决定是否调用/用什么 query/查几轮.
+ * 两种模式共用不变量: 检索命中与工具中间消息只进当轮 prompt, 绝不落 message 表.
  * <p>
- * 事务边界: {@link #chat} 主路径只做 读上下文 → (路由 → 检索) → 调主模型 → 落库.
- * 主路径至多两次 LLM 调用: 绑库会话 = 一次小输出路由 + 一次主回复; 未绑库或路由失败退化为一次.
+ * 事务边界: {@link #chat} 主路径只做 读上下文 → (路由 → 检索 | ReAct 循环) → 调主模型 → 落库.
+ * 主路径 LLM 调用数: pre 模式至多两次(绑库 = 一次小输出路由 + 一次主回复, 未绑库或路由失败退化为一次);
+ * agent 模式为 ReAct 循环调用, 以 agent.max-iterations 封顶.
  * 落库走短事务 + {@code @Version} 乐观锁重试. 摘要/标题等无关副作用异步化, 不让用户为之等待.
+ * <p>
+ * 流式版 {@link #chatStream}(POST .../messages/stream, SSE): 编排与 chat 相同 —— 同步段做校验
+ * 与 pre 前置(agent 模式整体同步执行后伪流式推出最终回复), 流段由 {@link ChatStreamAssembler}
+ * 拼帧并在流结束后落库; 流中断/断开则整轮丢弃不落库. 帧协议见 ChatStreamAssembler 类注释.
  *
  * @author ckj
  */
@@ -54,6 +67,16 @@ public class ChatService {
     private final RagRetrievalClient ragRetrievalClient;
     /** RAG 路由器: 判定本轮消息是否需要检索 + 改写检索句 */
     private final RagRouterService ragRouterService;
+    /** ReAct 显式循环执行器: rag.mode=agent 时替代 前置路由+单次主调用 */
+    private final ReActExecutor reActExecutor;
+    /** 流式对话的 SSE 帧拼装(delta/done/error + 聚合回复/捕获 usage) */
+    private final ChatStreamAssembler chatStreamAssembler;
+
+    /** 绑库会话的检索模式: pre=前置路由检索(默认) | agent=模型自主决策检索(ReAct) */
+    @Value("${rag.mode:pre}")
+    private String ragMode;
+
+    private static final String RAG_MODE_AGENT = "agent";
     /** 后台副作用处理器(摘要 / 标题生成), 异步 */
     private final ChatPostProcessor postProcessor;
     /** 不带 defaultSystem 的 ChatClient, 每次对话动态 .system(persona) 注入人格 */
@@ -70,6 +93,8 @@ public class ChatService {
                        PersonaService personaService,
                        RagRetrievalClient ragRetrievalClient,
                        RagRouterService ragRouterService,
+                       ReActExecutor reActExecutor,
+                       ChatStreamAssembler chatStreamAssembler,
                        ChatPostProcessor postProcessor,
                        ChatClient.Builder chatClientBuilder,
                        ChatMemory chatMemory,
@@ -80,6 +105,8 @@ public class ChatService {
         this.personaService = personaService;
         this.ragRetrievalClient = ragRetrievalClient;
         this.ragRouterService = ragRouterService;
+        this.reActExecutor = reActExecutor;
+        this.chatStreamAssembler = chatStreamAssembler;
         this.postProcessor = postProcessor;
         this.chatClient = chatClientBuilder.defaultAdvisors(loggingAdvisor).build();
         this.chatMemory = chatMemory;
@@ -132,26 +159,19 @@ public class ChatService {
         // 1. 人格 + 当前摘要(只读, 本轮不生成)
         String persona = resolvePersona(userId, conv);
 
-        // 2. RAG(绑库会话): 路由器判定要不要查 + 改写检索句, 需要才查库.
-        //    任何路由失败都退回"拿原话查", 聊天不因路由器中断; 命中片段只进当轮 system, 不落库
+        // 2~4. RAG 分流(绑库会话): agent 模式把检索决策交给模型(ReAct 循环),
+        //      pre 模式维持 前置路由检索 → 命中拼 system → 单次主调用
+        ChatResult result;
         int routerTokens = 0;
-        List<RetrievalHit> hits = List.of();
-        if (conv.getKbId() != null) {
-            RouteDecision rd = ragRouterService.route(
-                    resolvePersonaName(userId, conv), chatMemory.get(convKey), userContent);
-            log.info("[route] conversationId={} need={} fallback={} query=\"{}\"",
-                    conversationId, rd.need(), rd.fallback(), rd.query());
-            routerTokens = rd.tokens();
-            if (rd.need()) {
-                hits = ragRetrievalClient.retrieve(rd.query(), conv.getKbId(), null);   // topK=null → rag 侧默认配置
-            }
+        if (isAgentRagMode(conv)) {
+            result = chatReAct(conv, persona, convKey, userContent);
+        } else {
+            // 前置路由(原链路): 路由器判定要不要查 + 改写检索句, 需要才查库; 命中拼进 system
+            PreContext ctx = preparePreContext(persona, userId, conv, convKey, userContent);
+            routerTokens = ctx.routerTokens();
+            // 调主模型(主路径的主 LLM 调用, 事务外)
+            result = invokeModel(ctx.system(), convKey, userContent);
         }
-
-        // 3. system = 人格 + 摘要 + 参考资料; advisor 自动加载窗口历史注入
-        String system = buildSystem(persona, conv.getSummary(), hits);
-
-        // 4. 调主模型(主路径的主 LLM 调用, 事务外)
-        ChatResult result = invokeModel(system, convKey, userContent);
         if (result.reply() == null || result.reply().isBlank()) {
             throw new IllegalStateException("模型返回为空");
         }
@@ -161,10 +181,47 @@ public class ChatService {
         persistWithRetry(conversationId, userContent, result, routerTokens);
 
         // 6. 投递后台副作用(异步, 不阻塞): 摘要 / 标题. 主交互事务已提交, 异步任务能看到新消息
-        postProcessor.summarizeIfNeeded(conversationId);
-        postProcessor.generateTitleIfNeeded(conversationId, userContent, result.reply());
+        dispatchPostProcessors(conversationId, userContent, result.reply());
 
         return result.reply();
+    }
+
+
+    public Flux<ServerSentEvent<String>> chatStream(Long userId, Long conversationId, String userContent) {
+        if (userContent == null || userContent.isBlank()) {
+            throw new IllegalArgumentException("消息内容不能为空");
+        }
+        Conversation conv = requireOwned(userId, conversationId);
+        String convKey = String.valueOf(conversationId);
+        String persona = resolvePersona(userId, conv);
+
+        if (isAgentRagMode(conv)) {
+            // agent 伪流式: ReAct 同步执行(工具中间轮不出流), 落库后最终回复一次推出
+            ChatResult result = chatReAct(conv, persona, convKey, userContent);
+            if (result.reply() == null || result.reply().isBlank()) {
+                throw new IllegalStateException("模型返回为空");
+            }
+            persistWithRetry(conversationId, userContent, result, 0);
+            dispatchPostProcessors(conversationId, userContent, result.reply());
+            log.info("[stream] conversationId={} mode=agent tokens={} chars={}",
+                    conversationId, result.tokens(), result.reply().length());
+            return Flux.just(
+                    ChatStreamAssembler.deltaFrame(result.reply()),
+                    ChatStreamAssembler.doneFrame(conversationId, result.tokens()));
+        }
+
+        // pre 模式: 同步段做路由+检索(异常上抛), 流段拼帧 + 流后落库
+        PreContext ctx = preparePreContext(persona, userId, conv, convKey, userContent);
+        return chatStreamAssembler.assemble(
+                invokeModelStream(ctx.system(), convKey, userContent),
+                conversationId,
+                (reply, tokens) -> {
+                    persistWithRetry(conversationId, userContent, new ChatResult(reply, tokens),
+                            ctx.routerTokens());
+                    dispatchPostProcessors(conversationId, userContent, reply);
+                    log.info("[stream] conversationId={} mode=pre tokens={} chars={}",
+                            conversationId, tokens + ctx.routerTokens(), reply.length());
+                });
     }
 
     /** 删除会话(连带删除其下所有消息) */
@@ -176,6 +233,64 @@ public class ChatService {
     }
 
     // ---------- chat() 各步骤 ----------
+
+    /** rag.mode=agent 且绑库: 检索决策交给模型的 ReAct 模式; 未绑库/其他取值走 pre 原链路 */
+    private boolean isAgentRagMode(Conversation conv) {
+        return conv.getKbId() != null && RAG_MODE_AGENT.equalsIgnoreCase(ragMode);
+    }
+
+    /**
+     * pre 模式的前置上下文准备: 路由(判定+改写) → 按需检索 → 命中拼进 system.
+     * {@link #chat} 与 {@link #chatStream} 共用, 逻辑只有一份.
+     * <p>
+     * 前置路由(原链路): 路由器判定要不要查 + 改写检索句, 需要才查库.
+     * 任何路由失败都退回"拿原话查", 聊天不因路由器中断; 命中片段只进当轮 system, 不落库.
+     */
+    private PreContext preparePreContext(String persona, Long userId, Conversation conv,
+                                         String convKey, String userContent) {
+        List<RetrievalHit> hits = List.of();
+        int routerTokens = 0;
+        if (conv.getKbId() != null) {
+            RouteDecision rd = ragRouterService.route(
+                    resolvePersonaName(userId, conv), chatMemory.get(convKey), userContent);
+            log.info("[route] conversationId={} need={} fallback={} query=\"{}\"",
+                    conv.getId(), rd.need(), rd.fallback(), rd.query());
+            routerTokens = rd.tokens();
+            if (rd.need()) {
+                hits = ragRetrievalClient.retrieve(rd.query(), conv.getKbId(), null);   // topK=null → rag 侧默认配置
+            }
+        }
+        // system = 人格 + 摘要 + 参考资料; advisor 自动加载窗口历史注入
+        return new PreContext(buildSystem(persona, conv.getSummary(), hits), routerTokens);
+    }
+
+    /** 投递后台副作用(异步, 不阻塞): 摘要 / 标题. 主交互落库后调用, chat 与 chatStream 共用 */
+    private void dispatchPostProcessors(Long conversationId, String userContent, String reply) {
+        postProcessor.summarizeIfNeeded(conversationId);
+        postProcessor.generateTitleIfNeeded(conversationId, userContent, reply);
+    }
+
+    /** pre 模式前置编排的产物: 拼好的 system(人格+摘要+参考资料) + 路由消耗的 token */
+    private record PreContext(String system, int routerTokens) {
+    }
+
+    /**
+     * agent 模式主调用: 跳过前置路由与检索, 由 {@link ReActExecutor} 驱动显式
+     * Reason→Act 循环 —— 模型自主决定是否调 searchKnowledgeBase、用什么 query、查几轮.
+     * 工具中间消息只活在循环内, 绝不落 message 表(与前置命中不落库同一不变量).
+     */
+    private ChatResult chatReAct(Conversation conv, String persona, String convKey, String userContent) {
+        // agent 模式无前置命中, system 只有 人格 + 摘要 两段
+        String system = buildSystem(persona, conv.getSummary(), List.of());
+        ReActExecutor.ReActResult reAct = reActExecutor.execute(
+                system, chatMemory.get(convKey), userContent,
+                List.of(RagTools.forConversation(ragRetrievalClient, conv.getKbId())));
+        log.info("[react] conversationId={} steps={} tools=[{}] tokens={} truncated={}",
+                convKey, reAct.steps().size(),
+                reAct.steps().stream().map(ReActStep::toolName).distinct().toList(),
+                reAct.tokens(), reAct.truncated());
+        return new ChatResult(reAct.reply(), reAct.tokens());
+    }
 
     /** 校验会话存在且属于该用户, 返回会话 */
     private Conversation requireOwned(Long userId, Long conversationId) {
@@ -259,6 +374,25 @@ public class ChatService {
             reply = chatResponse.getResult().getOutput().getText();
         }
         return new ChatResult(reply, extractTokens(chatResponse));
+    }
+
+    /**
+     * 调用大模型【流式】: 与 {@link #invokeModel} 平行的主调用, 差异只有两点 ——
+     * {@code .stream()} 拿 token 级增量流; {@code streamUsage(true)} 让供应商在<b>最后一块</b>
+     * 附上 usage(DeepSeek 兼容 OpenAI 的 stream_options 协议), 由 ChatStreamAssembler 捕获聚合.
+     * advisor 链是一次性 Deque 的约束同样适用: 流只被消费一次, 这里不做任何重复订阅.
+     */
+    private Flux<ChatResponse> invokeModelStream(String system, String convKey, String userContent) {
+        MessageChatMemoryAdvisor advisor = MessageChatMemoryAdvisor.builder(chatMemory)
+                .conversationId(convKey)
+                .build();
+        return chatClient.prompt()
+                .system(system)
+                .advisors(advisor)
+                .user(userContent)
+                .options(OpenAiChatOptions.builder().streamUsage(true).build())
+                .stream()
+                .chatResponse();
     }
 
     /**

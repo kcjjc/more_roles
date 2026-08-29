@@ -79,4 +79,45 @@ class RagRouterServiceTest {
         assertTrue(d.need());
         assertEquals(RAW, d.query());
     }
+
+    // ---------- truncate 的代理对安全(防 DeepSeek 400 "unexpected end of hex escape") ----------
+
+    /** 断言字符串不含孤立代理(每个代理 char 都有配对) */
+    private static void assertNoLoneSurrogate(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isHighSurrogate(c)) {
+                assertTrue(i + 1 < s.length(), "高代理 " + (int) c + " 在末尾无人配对");
+                assertTrue(Character.isLowSurrogate(s.charAt(i + 1)), "高代理 " + (int) c + " 后面不是低代理");
+                i++;
+            } else {
+                assertFalse(Character.isLowSurrogate(c), "位置 " + i + " 出现无配对的低代理");
+            }
+        }
+    }
+
+    @Test
+    void 截断不会切破emoji代理对() {
+        // 200 个代码点后紧跟一个 emoji: 旧实现(substring 按 char 切)会把它切成半个
+        String text = "a".repeat(200) + "😀" + "b".repeat(10);
+        String out = RagRouterService.truncate(text);
+        assertEquals(200 + 1, out.codePointCount(0, out.length()));   // 200 个 a + 省略号
+        assertTrue(out.endsWith("…"));
+        assertNoLoneSurrogate(out);
+    }
+
+    @Test
+    void 既有孤立代理被清洗() {
+        // 模拟历史脏数据: 高代理 \uD83D 孤立存在(无低代理配对)
+        String dirty = "你好\uD83D世界";
+        String out = RagRouterService.truncate(dirty);
+        assertEquals("你好世界", out);
+        assertNoLoneSurrogate(out);
+    }
+
+    @Test
+    void 短文本原样保留_不加省略号() {
+        assertEquals("你好", RagRouterService.truncate("你好"));
+        assertEquals("", RagRouterService.truncate(null));
+    }
 }
